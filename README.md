@@ -1,6 +1,6 @@
-# Kynoze-Assistant (Telegram Forward Manager) 
+# Telegram Forward Manager
 
-**Self-hosted** Telegram forwarding / cloning manager. Run it on **your** machine or **any** host. 
+**Self-hosted** Telegram forwarding / cloning manager. Run it on **your** machine or **any** host — there is no required cloud vendor.
 
 One **management bot** (inline dashboard) drives:
 
@@ -11,9 +11,9 @@ One **management bot** (inline dashboard) drives:
 - **Index-Forward**
 - **Delete Manager**
 
-Python 3.11+, [Kurigram](https://github.com/KurimuzonAkuma/kurigram) (Pyrogram fork), async **PyMongo 4.17**.
+Python 3.11+, [Kurigram](https://github.com/KurimuzonAkuma/kurigram) (Pyrogram fork), async **PyMongo 4.18**.
 
-Licensed under the **[Universal Permissive License (UPL) 1.0](./LICENSE)** — use, copy, modify, and deploy anywhere.
+Licensed under **[The Unlicense](./LICENSE)** (SPDX: `Unlicense`) — public domain: use, copy, modify, and deploy anywhere.
 
 > For **your own channels and authorized use only**. See [Disclaimer](#disclaimer).
 
@@ -50,6 +50,7 @@ Full walkthrough: [Jobs manager in detail](#jobs-manager-in-detail).
 - Users search in a **target group**; results are message links
 - Index via selected **search bot** (ID walk) or a **user account**
 - Search bot must be **admin in the target group** (title + search replies)
+- Whole-word ranking (partial tokens like `mirza` / `pur` do not match `Mirzapur`)
 
 ### Index-Forward
 
@@ -589,7 +590,7 @@ telegram-bot/
 │   ├── access.py          Owner / admin / user flags
 │   └── security.py        Session encryption
 ├── requirements.txt
-├── LICENSE                Universal Permissive License 1.0
+├── LICENSE                The Unlicense
 └── README.md
 ```
 
@@ -656,8 +657,11 @@ Mass forwarding, cloning third-party channels, or ignoring FloodWait can **restr
 
 ## License
 
-**[The Universal Permissive License (UPL), Version 1.0](./LICENSE)** — SPDX: `UPL-1.0`
+**[The Unlicense](https://unlicense.org)** — SPDX: `Unlicense`  
+Full text: [LICENSE](./LICENSE)
 
-You may use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of this software, **including deploying it on any computer or cloud**, provided you keep the copyright notice and a reference to the UPL.
+This is free and unencumbered software released into the **public domain**.
 
-The software is provided **“AS IS”**, without warranty of any kind. See [LICENSE](./LICENSE) for the full text.
+You may copy, modify, publish, use, compile, sell, or distribute this software, in source or binary form, **for any purpose, commercial or non-commercial**, including deploying it on any computer or cloud, with or without attribution.
+
+The software is provided **“AS IS”**, without warranty of any kind. See [LICENSE](./LICENSE).
