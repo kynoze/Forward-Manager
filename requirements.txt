@@ -5,7 +5,3 @@ tgcrypto
 PyNaCl
 dnspython
 parsett
-#web
-Flask
-gunicorn
-aiohttp
