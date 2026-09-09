@@ -18,6 +18,8 @@ from pyrogram.errors import FloodWait, RPCError
 from core.wroxen.db import save_media
 from core.wroxen.extractor import build_message_link, extract_details
 
+from core.message_iter import custom_iter_messages
+
 logger = logging.getLogger(__name__)
 
 # Only video + document (same as classic Wroxen)
@@ -222,7 +224,7 @@ async def run_initial_index(
                     start=start,
                 )
             else:
-                await _run_bot_index(
+                await _index_via_bot(
                     owner_user_id=owner_user_id,
                     bot_client=bot_client,
                     wroxen_id=wroxen_id,
@@ -337,6 +339,12 @@ async def _run_userbot_index(
 
 
 async def _run_bot_index(
+    *args, **kwargs
+):
+    return await _index_via_bot(*args, **kwargs)
+
+
+async def _index_via_bot(
     *,
     owner_user_id: int,
     bot_client: Client,
@@ -348,66 +356,41 @@ async def _run_bot_index(
     maybe_ui,
     start: float,
 ) -> None:
-    """Fallback: sequential get_messages with bot client."""
-    current = range_start
-    BATCH = 80
-
-    while current < end_id:
+    """Fallback: sequential ID walk with bot client (shared custom_iter_messages)."""
+    async for msg in custom_iter_messages(
+        bot_client,
+        source_chat_id,
+        limit=end_id,
+        offset=range_start,
+        batch_size=80,
+    ):
         if CANCEL.get(owner_user_id):
             PROGRESS[owner_user_id]["status"] = "cancelled"
             await maybe_ui(True)
             break
-
-        batch_end = min(current + BATCH, end_id)
-        ids = list(range(current + 1, batch_end + 1))
-        if not ids:
-            break
+        PROGRESS[owner_user_id]["processed"] += 1
+        if msg is None or getattr(msg, "empty", False):
+            PROGRESS[owner_user_id]["skipped"] += 1
+            continue
         try:
-            messages = await bot_client.get_messages(source_chat_id, ids)
-        except FloodWait as e:
-            await asyncio.sleep(int(getattr(e, "value", 5)) + 1)
-            continue
-        except RPCError:
-            PROGRESS[owner_user_id]["errors"] += len(ids)
-            current = batch_end
-            await maybe_ui(False)
-            continue
-        except Exception:
-            logger.exception("wroxen get_messages")
-            PROGRESS[owner_user_id]["errors"] += len(ids)
-            current = batch_end
-            await maybe_ui(False)
-            continue
-
-        if not isinstance(messages, list):
-            messages = [messages]
-
-        for msg in messages:
-            if CANCEL.get(owner_user_id):
-                break
-            PROGRESS[owner_user_id]["processed"] += 1
-            if msg is None or getattr(msg, "empty", False):
+            result = await index_message_to_db(
+                owner_user_id, wroxen_id, source_chat_id, msg, source_username
+            )
+            if result == "saved":
+                PROGRESS[owner_user_id]["indexed"] += 1
+            elif result == "duplicate":
+                PROGRESS[owner_user_id]["duplicates"] += 1
+            elif result == "skip":
                 PROGRESS[owner_user_id]["skipped"] += 1
-                continue
-            try:
-                result = await index_message_to_db(
-                    owner_user_id, wroxen_id, source_chat_id, msg, source_username
-                )
-                if result == "saved":
-                    PROGRESS[owner_user_id]["indexed"] += 1
-                elif result == "duplicate":
-                    PROGRESS[owner_user_id]["duplicates"] += 1
-                elif result == "skip":
-                    PROGRESS[owner_user_id]["skipped"] += 1
-                else:
-                    PROGRESS[owner_user_id]["errors"] += 1
-            except Exception:
+            else:
                 PROGRESS[owner_user_id]["errors"] += 1
-
-        current = batch_end
-        PROGRESS[owner_user_id]["current_id"] = current
+        except Exception:
+            PROGRESS[owner_user_id]["errors"] += 1
+        mid = int(getattr(msg, "id", 0) or 0)
+        if mid:
+            PROGRESS[owner_user_id]["current_id"] = mid
         await maybe_ui(False)
-        await asyncio.sleep(0.05)
+
 
 
 def _bar(pct: int) -> str:
