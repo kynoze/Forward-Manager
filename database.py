@@ -1177,7 +1177,7 @@ async def create_job(
     doc = {
         "user_id": user_id,
         "job_id": job_id,
-        "name": name or f"Job #{job_id[:6]}",
+        "name": (name or "").strip() or (source_title or "").strip() or f"Job #{job_id[:6]}",
         "source_chat_id": source_chat_id,
         "source_title": source_title,
         "target_chat_ids": target_chat_ids,
@@ -2041,7 +2041,7 @@ async def create_wroxen_config(
     doc = {
         "user_id": user_id,
         "wroxen_id": wroxen_id,
-        "name": name or f"Wroxen {wroxen_id[:6]}",
+        "name": (name or target_title or f"Wroxen {wroxen_id[:6]}"),
         "bot_id": bot_id,
         "source_chat_id": int(source_chat_id),
         "source_title": source_title,
