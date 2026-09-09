@@ -93,6 +93,9 @@ async def test_uri(uri: str, timeout_ms: int = 8000) -> Tuple[bool, str]:
     try:
         client = AsyncMongoClient(
             uri,
+            maxPoolSize=15,
+            minPoolSize=0,
+            maxIdleTimeMS=45000,
             serverSelectionTimeoutMS=timeout_ms,
             connectTimeoutMS=timeout_ms,
         )
@@ -313,7 +316,12 @@ async def search_media(
         and_parts = []
         for w in tokens[:6]:
             safe = re.escape(w)
-            and_parts.append({"title": {"$regex": safe, "$options": "i"}})
+            and_parts.append({
+                "title": {
+                    "$regex": "(^|[^A-Za-z0-9])" + safe + "([^A-Za-z0-9]|$)",
+                    "$options": "i",
+                }
+            })
         fb = {**base, "$and": and_parts} if and_parts else base
         try:
             cursor = col.find(fb, projection).limit(fetch_n)
@@ -437,21 +445,23 @@ def _rank_and_filter_results(
             except (TypeError, ValueError):
                 continue
 
-        # Every query token must appear in TITLE (not caption / "2.0" audio tags)
+        # Every query token must appear as a FULL WORD in the title.
+        # Substring hits like "mirza"/"pur" inside "Mirzapur" are rejected.
         if tokens:
+            words = title_n.split()
             ok = True
             for tok in tokens:
-                # whole-token style: digit or word boundary in normalized title
-                if tok.isdigit():
-                    if not re.search(rf"(?:^|\s){re.escape(tok)}(?:\s|$)", title_n):
+                tok_l = tok.lower()
+                if tok_l.isdigit():
+                    if tok_l not in words and not re.search(
+                        r"(?:^|\s)" + re.escape(tok_l) + r"(?:\s|$)", title_n
+                    ):
                         ok = False
                         break
                 else:
-                    if tok not in title_n.split() and tok not in title_n:
-                        # require contiguous substring at least
-                        if tok not in title_n:
-                            ok = False
-                            break
+                    if tok_l not in words:
+                        ok = False
+                        break
             if not ok:
                 continue
 

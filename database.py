@@ -9,6 +9,7 @@ from pymongo import AsyncMongoClient, ASCENDING, DESCENDING
 
 from pymongo.errors import DuplicateKeyError
 import copy
+import asyncio
 import logging
 import os
 from enum import Enum
@@ -16,6 +17,21 @@ from enum import Enum
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+
+# Atlas M0 / shared: keep pools small so concurrent clients don't exhaust cluster limit (~500).
+MONGO_CLIENT_KW = dict(
+    serverSelectionTimeoutMS=20000,
+    connectTimeoutMS=20000,
+    socketTimeoutMS=45000,
+    retryWrites=True,
+    retryReads=True,
+    maxPoolSize=25,
+    minPoolSize=0,
+    maxIdleTimeMS=45000,
+    waitQueueTimeoutMS=15000,
+    heartbeatFrequencyMS=10000,
+)
 
 
 # ============================================================
@@ -57,6 +73,8 @@ class Database:
     def __init__(self):
         self.client = None
         self.db = None
+        self._lock = asyncio.Lock()
+        self._generation = 0  # bumps on each successful connect/reconnect
 
         self.users = None
         self.targets = None
@@ -69,6 +87,20 @@ class Database:
         self.job_duplicate_index = None
         self.delete_configs = None
 
+    def _bind_collections(self) -> None:
+        """Point all handles at the current client/db (call only under lock)."""
+        self.db = self.client[Config.DB_NAME]
+        self.users = self.db["users"]
+        self.targets = self.db["targets"]
+        self.duplicates = self.db["duplicates"]
+        self.forward_accounts = self.db["forward_accounts"]
+        self.forward_bots = self.db["forward_bots"]
+        self.forward_jobs = self.db["forward_jobs"]
+        self.statistics = self.db["statistics"]
+        self.job_logs = self.db["job_logs"]
+        self.job_duplicate_index = self.db["job_duplicate_index"]
+        self.delete_configs = self.db["delete_configs"]
+
     async def connect(self) -> None:
         """Connect to MongoDB and create indexes."""
         try:
@@ -79,22 +111,12 @@ class Database:
 
             self.client = AsyncMongoClient(
                 Config.MONGO_URI,
-                serverSelectionTimeoutMS=5000
+                **MONGO_CLIENT_KW,
             )
             await self.client.admin.command("ping")
 
-            self.db = self.client[Config.DB_NAME]
-
-            self.users = self.db["users"]
-            self.targets = self.db["targets"]
-            self.duplicates = self.db["duplicates"]
-            self.forward_accounts = self.db["forward_accounts"]
-            self.forward_bots = self.db["forward_bots"]
-            self.forward_jobs = self.db["forward_jobs"]
-            self.statistics = self.db["statistics"]
-            self.job_logs = self.db["job_logs"]
-            self.job_duplicate_index = self.db["job_duplicate_index"]
-            self.delete_configs = self.db["delete_configs"]
+            self._bind_collections()
+            self._generation += 1
 
             await self._create_indexes()
             try:
@@ -106,8 +128,127 @@ class Database:
 
         except Exception as e:
             logger.error(f"❌ MongoDB connection failed: {e}")
+            logger.error(
+                "MongoDB unreachable. Check: (1) Atlas Network Access allows 0.0.0.0/0 "
+                "or this host IP (2) MONGO_URI correct (3) cluster not paused "
+                "(4) outbound TCP 27017 not blocked on Heroku/network."
+            )
             raise
-          
+
+
+    async def close(self) -> None:
+        """Close client (best-effort). Safe under lock; nulls handles first."""
+        async with self._lock:
+            client = self.client
+            self.client = None
+            self.db = None
+            self.users = None
+            self.targets = None
+            self.duplicates = None
+            self.forward_accounts = None
+            self.forward_bots = None
+            self.forward_jobs = None
+            self.statistics = None
+            self.job_logs = None
+            self.job_duplicate_index = None
+            self.delete_configs = None
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+                logger.info("MongoDB connection closed")
+
+    async def reconnect(self) -> bool:
+        """Race-safe reconnect for long-running processes (6–12 month jobs).
+
+        - Single-flight via lock (workers never share a half-closed client)
+        - Prefer ping retry before close (PyMongo often recovers without close)
+        - Only then replace client; rebind all collection handles
+        """
+        async with self._lock:
+            # Another coroutine may have already recovered
+            try:
+                if self.client is not None:
+                    await self.client.admin.command("ping")
+                    return True
+            except Exception:
+                pass
+
+            logger.warning("MongoDB reconnect: closing stale client and reopening…")
+            old = self.client
+            self.client = None
+            self.db = None
+            self.users = None
+            self.targets = None
+            self.duplicates = None
+            self.forward_accounts = None
+            self.forward_bots = None
+            self.forward_jobs = None
+            self.statistics = None
+            self.job_logs = None
+            self.job_duplicate_index = None
+            self.delete_configs = None
+            if old is not None:
+                try:
+                    await old.close()
+                except Exception:
+                    pass
+
+            try:
+                from core.dns_fix import apply_termux_dns_fix
+                apply_termux_dns_fix()
+                self.client = AsyncMongoClient(Config.MONGO_URI, **MONGO_CLIENT_KW)
+                await self.client.admin.command("ping")
+                self._bind_collections()
+                self._generation += 1
+                # Indexes already exist; skip heavy recreate on reconnect
+                logger.info("✅ MongoDB reconnected (generation=%s)", self._generation)
+                return True
+            except Exception as e:
+                logger.error("MongoDB reconnect failed: %s", e)
+                self.client = None
+                return False
+
+    async def ensure_connected(self) -> bool:
+        """Ping with soft retries; reconnect only if still dead.
+
+        Avoids closing a healthy-but-slow pool on every blip (critical for
+        multi-month job workers sharing one client).
+        """
+        # Fast path: no client yet
+        if self.client is None:
+            try:
+                await self.connect()
+                return self.client is not None
+            except Exception:
+                return await self.reconnect()
+
+        last_err = None
+        for attempt in range(3):
+            try:
+                # Read client under brief check — if reconnect swapped it, still OK
+                client = self.client
+                if client is None:
+                    return await self.reconnect()
+                await client.admin.command("ping")
+                return True
+            except Exception as e:
+                last_err = e
+                msg = str(e).lower()
+                # Closed client cannot recover by ping — must replace
+                if "after close" in msg or "invalidoperation" in type(e).__name__.lower():
+                    logger.warning("MongoDB client closed — reconnecting")
+                    return await self.reconnect()
+                await asyncio.sleep(0.4 * (attempt + 1))
+
+        logger.warning(
+            "MongoDB ping failed after retries (%s) — reconnecting",
+            type(last_err).__name__ if last_err else "?",
+        )
+        return await self.reconnect()
+
+
     async def _create_indexes(self) -> None:
         # users
         await self.users.create_index([("user_id", ASCENDING)], unique=True)
@@ -199,14 +340,44 @@ class Database:
 
         logger.info("✅ Database indexes created")
 
-    async def close(self) -> None:
-        if self.client:
-            await self.client.close()
-            logger.info("MongoDB connection closed")
-
-
 # Global instance
 db = Database()
+
+async def mongo_health_loop(interval: int = 90) -> None:
+    """Periodically ping Mongo; soft-reconnect if pool is truly dead.
+
+    Long-running jobs (months) share one client — never close while workers
+    may still be mid-query without the reconnect lock.
+    """
+    from core.errors import is_mongo_unreachable
+    consecutive_fail = 0
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            ok = await db.ensure_connected()
+            if ok:
+                consecutive_fail = 0
+            else:
+                consecutive_fail += 1
+                logger.warning(
+                    "mongo_health_loop: still down (fail streak=%s)", consecutive_fail
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            consecutive_fail += 1
+            if is_mongo_unreachable(e) or "after close" in str(e).lower():
+                logger.warning(
+                    "mongo_health_loop: unreachable (%s) — reconnect",
+                    type(e).__name__,
+                )
+                try:
+                    await db.reconnect()
+                except Exception:
+                    pass
+            else:
+                logger.exception("mongo_health_loop")
+
 
 
 # ============================================================
@@ -251,21 +422,21 @@ async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
 
 DEFAULT_TARGET_SETTINGS = {
     "caption_enabled": False,
-    "rich_message_enabled": False,  # Bot API 10.1 rich text for text posts
+    "rich_message_enabled": False,
     "caption_template": "<b>{caption}</b>",
     "replace_enabled": False,
-    "replacements": [],                    # [{"from": "...", "to": "..."}]
+    "replacements": [],
     "block_words": [],
-    "block_words_enabled": True,           # ON/OFF independent of stored list
+    "block_words_enabled": False,
     "whitelist_mode": False,
     "whitelist": [],
     "remove_links": False,
-    "inline_buttons": [],                  # [[{"text": "...", "url": "..."}]]
-    "inline_buttons_enabled": True,        # ON/OFF independent of stored buttons
+    "inline_buttons": [],
+    "inline_buttons_enabled": False,
     "media_types": ["photo", "video", "document", "audio", "animation", "voice", "text", "sticker", "video_note"],
     "forward_tag": False,
     "delay": 1.0,
-    "anti_duplicate": True,
+    "anti_duplicate": False,
     "future_new_posts": False,
 }
 
@@ -568,9 +739,17 @@ async def bulk_mark_job_preindex(job_id: str, items: list) -> int:
         return 0
     try:
         res = await db.job_duplicate_index.bulk_write(ops, ordered=False)
-        return int(getattr(res, "upserted_count", 0) or 0)
+        # Count all successful writes (new + already-existing matches)
+        upserted = int(getattr(res, "upserted_count", 0) or 0)
+        matched = int(getattr(res, "matched_count", 0) or 0)
+        # matched includes docs that already existed; prefer ops length on full success
+        n = upserted + matched
+        if n <= 0:
+            n = len(ops)
+        return n
     except Exception as e:
         logger.error("bulk_mark_job_preindex: %s", e)
+        # Still count locally so UI is not stuck at 0 when Mongo partially works
         return 0
 
 
@@ -870,6 +1049,16 @@ async def get_user_bots(user_id: int) -> List[Dict[str, Any]]:
 
 
 async def get_bot(user_id: int, bot_id: str) -> Optional[Dict[str, Any]]:
+    if bot_id == "__mgmt__":
+        return {
+            "bot_id": "__mgmt__",
+            "name": "Management Bot",
+            "bot_username": None,
+            "status": "active",
+            "is_mgmt": True,
+            "bot_token": None,
+            "user_id": user_id,
+        }
     return await db.forward_bots.find_one({
         "user_id": user_id,
         "bot_id": bot_id
@@ -911,6 +1100,58 @@ async def increment_bot_forwarded(user_id: int, bot_id: str, count: int = 1) -> 
 # FORWARD JOBS
 # ============================================================
 
+
+
+async def rename_job(user_id: int, job_id: str, new_name: str) -> bool:
+    """Rename a job; does not affect other jobs' auto-naming."""
+    name = (new_name or "").strip()
+    if not name:
+        return False
+    if len(name) > 80:
+        name = name[:80]
+    r = await db.forward_jobs.update_one(
+        {"user_id": user_id, "job_id": job_id},
+        {"$set": {"name": name, "name_custom": True}},
+    )
+    return r.modified_count > 0 or r.matched_count > 0
+
+async def next_job_name_for_source(user_id: int, source_title: str) -> str:
+    """Auto name for new jobs only.
+
+    First job for this source title → exact title (e.g. "Alex Updates")
+    Second → "Alex Updates A", then B, C, ...
+    Independent per distinct source title string.
+    Does not rename existing jobs. Custom names are untouched when caller passes them.
+    """
+    base = (source_title or "Source").strip() or "Source"
+    has_exact = False
+    used_letters = set()
+    cursor = db.forward_jobs.find({"user_id": user_id})
+    async for j in cursor:
+        n = (j.get("name") or "").strip()
+        if not n:
+            continue
+        if n == base:
+            has_exact = True
+            continue
+        prefix = base + " "
+        if n.startswith(prefix):
+            suf = n[len(prefix):].strip()
+            if len(suf) == 1 and "A" <= suf.upper() <= "Z":
+                used_letters.add(suf.upper())
+    if not has_exact:
+        return base
+    for i in range(26):
+        letter = chr(ord("A") + i)
+        if letter not in used_letters:
+            return f"{base} {letter}"
+    # overflow after Z
+    n = 27
+    while True:
+        candidate = f"{base} {n}"
+        # rare
+        return candidate
+
 async def create_job(
     user_id: int,
     source_chat_id: Union[int, str],
@@ -936,7 +1177,7 @@ async def create_job(
     doc = {
         "user_id": user_id,
         "job_id": job_id,
-        "name": name or f"Job #{job_id[:6]}",
+        "name": (name or "").strip() or (source_title or "").strip() or f"Job #{job_id[:6]}",
         "source_chat_id": source_chat_id,
         "source_title": source_title,
         "target_chat_ids": target_chat_ids,
@@ -1785,6 +2026,7 @@ async def create_wroxen_config(
     target_chat_id: int,
     target_title: str,
     name: Optional[str] = None,
+    index_account_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     await ensure_wroxen_indexes()
     existing = await db.db["wroxen_configs"].find_one({
@@ -1799,7 +2041,7 @@ async def create_wroxen_config(
     doc = {
         "user_id": user_id,
         "wroxen_id": wroxen_id,
-        "name": name or f"Wroxen {wroxen_id[:6]}",
+        "name": (name or target_title or f"Wroxen {wroxen_id[:6]}"),
         "bot_id": bot_id,
         "source_chat_id": int(source_chat_id),
         "source_title": source_title,
@@ -1807,6 +2049,7 @@ async def create_wroxen_config(
         "target_title": target_title,
         "enabled": True,
         "auto_index": True,
+        "index_account_id": index_account_id,  # userbot for full-history index (optional)
         "created_at": now,
         "updated_at": now,
         "last_index_at": None,

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 _mgmt_bot = None
 _rate: dict[str, float] = {}
+_owner_log_cache: dict | None = None  # {chat_id, title} last known good
 
 USER_RATE_SEC = 20.0
 OWNER_RATE_SEC = 8.0
@@ -124,18 +125,38 @@ async def set_user_log_chat(user_id: int, chat_id: Optional[int], title: Optiona
 
 
 async def get_owner_log_chat() -> Optional[dict]:
-    from core.access import get_system_settings
-    s = await get_system_settings()
-    cid = s.get("owner_log_chat_id")
-    if not cid:
-        return None
-    return {
-        "chat_id": int(cid),
-        "title": s.get("owner_log_chat_title") or str(cid),
-    }
+    """Owner log chat from DB; falls back to memory cache / env if Mongo is down."""
+    global _owner_log_cache
+    try:
+        from core.access import get_system_settings
+        s = await get_system_settings()
+        cid = s.get("owner_log_chat_id")
+        if cid:
+            info = {
+                "chat_id": int(cid),
+                "title": s.get("owner_log_chat_title") or str(cid),
+            }
+            _owner_log_cache = info
+            return info
+    except Exception as e:
+        # Rate-limit: only log first failure every 5 min
+        if _should_rate("get_owner_log_chat_fail", 300.0):
+            logger.warning("get_owner_log_chat DB failed: %s", type(e).__name__)
+    if _owner_log_cache and _owner_log_cache.get("chat_id"):
+        return _owner_log_cache
+    try:
+        from config import Config
+        cid = getattr(Config, "OWNER_LOG_CHAT_ID", None)
+        if cid:
+            return {"chat_id": int(cid), "title": "Owner log (env)"}
+    except Exception:
+        pass
+    return None
+
 
 
 async def set_owner_log_chat(chat_id: Optional[int], title: Optional[str] = None) -> None:
+    global _owner_log_cache
     from core.access import update_system_settings
     if chat_id is None:
         await update_system_settings({
@@ -147,6 +168,11 @@ async def set_owner_log_chat(chat_id: Optional[int], title: Optional[str] = None
         "owner_log_chat_id": int(chat_id),
         "owner_log_chat_title": title or str(chat_id),
     })
+    if chat_id:
+        _owner_log_cache = {"chat_id": int(chat_id), "title": title or str(chat_id)}
+    else:
+        _owner_log_cache = None
+
 
 
 async def verify_mgmt_admin(client, chat) -> tuple[bool, str]:
@@ -277,8 +303,12 @@ async def report_owner(
         if extra:
             lines += ["", _clip(str(extra), 800)]
         await _send(info["chat_id"], "\n".join(lines))
-    except Exception:
-        logger.exception("report_owner failed")
+    except Exception as e:
+        # Avoid log storms when Mongo itself is down
+        if "ServerSelectionTimeout" in type(e).__name__ or "NetworkTimeout" in type(e).__name__:
+            logger.error("report_owner skipped — MongoDB unreachable (%s)", type(e).__name__)
+        else:
+            logger.exception("report_owner failed")
 
 
 class OwnerLogHandler(logging.Handler):
@@ -306,6 +336,15 @@ class OwnerLogHandler(logging.Handler):
             raw = record.getMessage()
         except Exception:
             raw = ""
+        # Don't spam owner chat with Mongo Atlas network timeouts
+        low = (raw or "").lower()
+        if (
+            "serverselectiontimeout" in low
+            or "serverselectiontimeouterror" in (record.exc_info[0].__name__.lower() if record.exc_info and record.exc_info[0] else "")
+            or "mongodb unreachable" in low
+            or "get_owner_log_chat db failed" in low
+        ):
+            return
         try:
             msg = self.format(record)
         except Exception:

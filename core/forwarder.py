@@ -42,6 +42,7 @@ from database import is_job_preindex_duplicate, mark_job_preindex_id
 from core.filters import get_unique_file_id
 from core.caption import build_inline_keyboard, process_caption
 from core.filters import should_process_message
+from core.message_iter import custom_iter_messages
 
 logger = logging.getLogger(__name__)
 
@@ -133,52 +134,6 @@ async def _edit_progress(
     except Exception:
         pass
 
-
-async def custom_iter_messages(
-    client: Client,
-    chat_id: Union[int, str],
-    limit: int,
-    offset: int = 0,
-) -> AsyncGenerator[Message, None]:
-    """
-    Iterate message IDs (offset+1) .. limit inclusive.
-    Batch errors are logged and the batch is skipped (not the whole job).
-    """
-    current = offset
-    consecutive_failures = 0
-    while current < limit:
-        batch_size = min(100, limit - current)
-        message_ids = list(range(current + 1, current + batch_size + 1))
-        try:
-            messages = await client.get_messages(chat_id, message_ids)
-            consecutive_failures = 0
-        except FloodWait as e:
-            await asyncio.sleep(int(e.value) + 1)
-            continue
-        except Exception as e:
-            consecutive_failures += 1
-            logger.exception(
-                "get_messages failed at id~%s (failure %s): %s",
-                current + 1,
-                consecutive_failures,
-                e,
-            )
-            # Skip this batch so one bad window does not kill the whole job
-            current += batch_size
-            if consecutive_failures >= 5:
-                logger.error("Too many get_messages failures — stopping iteration")
-                return
-            await asyncio.sleep(2)
-            continue
-
-        if not isinstance(messages, list):
-            messages = [messages]
-
-        for msg in messages:
-            current += 1
-            if msg is None:
-                continue
-            yield msg
 
 
 async def _send_text(
@@ -320,6 +275,33 @@ async def forward_messages(
     PAUSE = pause_flag or {}
     # Keep QF control buttons on progress edits when auto_progress is off
     progress_kb = None if auto_progress else _qf_progress_keyboard()
+    # Throttle expensive Mongo reads/writes (old clone.py had none per-skip)
+    JOB_DB_EVERY = 25  # messages between job status/stats DB hits
+    _since_db = 0
+    _pending_stats = {"fetched": 0, "forwarded": 0, "errors": 0,
+                     "skipped_filter": 0, "skipped_deleted": 0, "skipped_duplicate": 0}
+    _last_cursor = skip
+
+    async def _flush_job_stats(force: bool = False):
+        nonlocal _since_db, _pending_stats, _last_cursor
+        if not job_id:
+            return
+        if not force and _since_db < JOB_DB_EVERY:
+            return
+        delta = {k: v for k, v in _pending_stats.items() if v}
+        if not delta and not force:
+            _since_db = 0
+            return
+        try:
+            await update_job_stats(
+                user_id, job_id, delta or {"fetched": 0}, current_msg_id=_last_cursor
+            )
+        except Exception:
+            pass
+        for k in _pending_stats:
+            _pending_stats[k] = 0
+        _since_db = 0
+
 
     current_client = client
     current_account_id = account_id
@@ -390,14 +372,18 @@ async def forward_messages(
                     pass
                 return stats
 
-            if job_id:
+            # Cheap cancel flag check every message; Mongo job status every N
+            if job_id and _since_db == 0:
                 from database import get_job
-
                 fresh = await get_job(user_id, job_id)
                 if not fresh or fresh.get("status") != JobStatus.RUNNING.value:
+                    await _flush_job_stats(force=True)
                     return stats
 
             stats.fetched += 1
+            _since_db += 1
+            _last_cursor = message.id
+            _pending_stats["fetched"] += 1
 
             try:
                 from handlers.source_handler import QF_PROGRESS
@@ -424,13 +410,13 @@ async def forward_messages(
             if not should:
                 if reason == "deleted":
                     stats.skipped_deleted += 1
+                    _pending_stats["skipped_deleted"] += 1
                 else:
                     stats.skipped_filter += 1
-                if job_id:
-                    await update_job_stats(
-                        user_id, job_id, {"fetched": 1}, current_msg_id=message.id
-                    )
-                if auto_progress and progress_message and stats.fetched % PROGRESS_EVERY == 0:
+                    _pending_stats["skipped_filter"] += 1
+                # No per-skip Mongo write — flush every JOB_DB_EVERY (fast skip like old clone)
+                await _flush_job_stats(force=False)
+                if auto_progress and progress_message and stats.fetched % (PROGRESS_EVERY * 5) == 0:
                     await _edit_progress(
                         progress_message,
                         f"**Forwarding…** `{message.id}` / `{last_msg_id}`\n\n{stats.summary()}",
@@ -516,6 +502,9 @@ async def forward_messages(
                             forwarded_delta=1,
                             fetched_delta=1,
                         )
+                        # already counted in DB — don't re-flush as pending fetched
+                        _since_db = max(0, _since_db - 1)
+                        _last_cursor = message.id
                     except Exception:
                         await update_job_stats(
                             user_id,

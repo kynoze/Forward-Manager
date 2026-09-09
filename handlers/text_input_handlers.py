@@ -59,6 +59,21 @@ def _unwrap_job(state):
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start", "targets", "cancel"]))
 async def handle_all_text_input(client: Client, message: Message):
+    # Bind DB helpers at function entry so no UnboundLocalError from nested imports
+    from database import (
+        get_user_bots,
+        get_user_accounts,
+        get_user_targets,
+        get_target,
+        get_account,
+        get_job,
+        update_job,
+        add_target,
+        add_forward_bot,
+        add_forward_account,
+        update_account,
+        update_target_settings,
+    )
     from handlers.logchat_handlers import handle_log_chat_text
     if await handle_log_chat_text(client, message):
         return
@@ -180,7 +195,40 @@ async def handle_all_text_input(client: Client, message: Message):
             )
         return
 
+    # Job rename
+    ren = get_state(client, "job_rename_state", user_id)
+    if ren and ren.get("job_id"):
+        text = (message.text or "").strip()
+        if not text:
+            await message.reply_text("Send a non-empty name.")
+            return
+        from database import rename_job, get_job
+        ok = await rename_job(user_id, ren["job_id"], text)
+        set_state(client, "job_rename_state", user_id, None)
+        if ok:
+            job = await get_job(user_id, ren["job_id"])
+            await message.reply_text(f"✅ Job renamed to **{job.get('name')}**")
+        else:
+            await message.reply_text("❌ Rename failed.")
+        return
+
     job_state = get_state(client, "job_create_state", user_id)
+    if job_state and job_state.get("step") == "waiting_name":
+        text = (message.text or "").strip()
+        if text.lower() == "auto":
+            job_state.pop("custom_name", None)
+        else:
+            job_state["custom_name"] = text[:80]
+        job_state["step"] = "confirm"
+        set_state(client, "job_create_state", user_id, job_state)
+        from handlers.jobs_handlers import job_confirm_text, job_confirm_keyboard
+        await message.reply_text(
+            job_confirm_text(job_state),
+            reply_markup=job_confirm_keyboard(job_state),
+        )
+        return
+
+
     if job_state and job_state.get("step") == "waiting_skip":
         try:
             skip = int(text)
@@ -558,7 +606,6 @@ async def handle_all_text_input(client: Client, message: Message):
                 )
 
             from core.access import check_limit
-            from database import get_user_targets, get_user_bots, get_user_accounts
 
             err = await check_limit(
                 user_id, "targets", len(await get_user_targets(user_id))
