@@ -1059,10 +1059,20 @@ async def get_bot(user_id: int, bot_id: str) -> Optional[Dict[str, Any]]:
             "bot_token": None,
             "user_id": user_id,
         }
-    return await db.forward_bots.find_one({
-        "user_id": user_id,
-        "bot_id": bot_id
-    })
+    uid = int(user_id)
+    bid = str(bot_id)
+    doc = await db.forward_bots.find_one({"user_id": uid, "bot_id": bid})
+    if doc:
+        return doc
+    # Fallback: some older rows stored bot_id without str() normalization
+    try:
+        if bid.isdigit():
+            doc = await db.forward_bots.find_one({"user_id": uid, "bot_id": int(bid)})
+            if doc:
+                return doc
+    except Exception:
+        pass
+    return await db.forward_bots.find_one({"user_id": uid, "bot_id": bot_id})
 
 
 async def update_bot(user_id: int, bot_id: str, updates: Dict[str, Any]) -> bool:
@@ -2049,6 +2059,8 @@ async def create_wroxen_config(
         "target_title": target_title,
         "enabled": True,
         "auto_index": True,
+        # Trending Now / Top Searches in search groups — default OFF
+        "trending_enabled": False,
         "index_account_id": index_account_id,  # userbot for full-history index (optional)
         "created_at": now,
         "updated_at": now,
@@ -2088,6 +2100,22 @@ async def delete_wroxen_config(user_id: int, wroxen_id: str) -> bool:
 
 async def list_all_enabled_wroxen() -> List[Dict[str, Any]]:
     return await db.db["wroxen_configs"].find({"enabled": True}).to_list(length=None)
+
+
+async def is_wroxen_trending_enabled(wroxen_id: str) -> bool:
+    """Per-Wroxen Trending feature flag. Default OFF if field missing."""
+    if not wroxen_id:
+        return False
+    try:
+        doc = await db.db["wroxen_configs"].find_one(
+            {"wroxen_id": str(wroxen_id)},
+            {"trending_enabled": 1},
+        )
+        if not doc:
+            return False
+        return bool(doc.get("trending_enabled", False))
+    except Exception:
+        return False
 
 
 # ============================================================

@@ -105,6 +105,12 @@ async def main():
         from core.wroxen.runtime import refresh_routing
         await refresh_routing()
         logger.info("Wroxen runtime routing loaded")
+        try:
+            from core.wroxen.trending.service import start_trending_updater
+            await start_trending_updater()
+            logger.info("Wroxen Trending updater scheduled")
+        except Exception:
+            logger.exception("Wroxen Trending updater start skipped")
     except Exception:
         logger.exception("Wroxen runtime start skipped")
         try:
@@ -113,9 +119,10 @@ async def main():
         except Exception:
             pass
     try:
+        # One-shot boot bind for enabled CNL rules (restart/redeploy only).
         from core.cnl.runtime import start_cnl_runtime
         await start_cnl_runtime()
-        logger.info("CNL runtime started")
+        logger.info("CNL boot-bind scheduled (enabled rules start only on restart/redeploy)")
     except Exception:
         logger.exception("CNL runtime start skipped")
         try:
@@ -155,6 +162,11 @@ async def main():
             logger.info("Cancelled %s in-memory job task(s)", len(tasks))
     except Exception:
         logger.exception("job task cancel on shutdown")
+    try:
+        from core.wroxen.trending.service import stop_trending_updater
+        await stop_trending_updater()
+    except Exception:
+        pass
     try:
         from core.lifecycle import shutdown_lifecycle
         await shutdown_lifecycle()

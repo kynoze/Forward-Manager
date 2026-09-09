@@ -34,6 +34,33 @@ class Config:
         or os.environ.get("ENCRYPTION_KEY", "")
     )
     SESSION_SECRET = SESSION_ENC_KEY  # alias
+    # Wroxen Trending (TMDB) — optional; Trending Now disabled until set.
+    # Prefer TMDB_API_KEYS="key1,key2,..." (rotate on rate-limit). TMDB_API_KEY still works.
+    TMDB_API_KEY = (os.environ.get("TMDB_API_KEY", "") or "").strip()
+    TMDB_API_KEYS = (os.environ.get("TMDB_API_KEYS", "") or "").strip()
+    TRENDING_UPDATE_INTERVAL = int(os.environ.get("TRENDING_UPDATE_INTERVAL", "7200") or 7200)
+    BOT_TZ = (os.environ.get("BOT_TZ", "Asia/Kolkata") or "Asia/Kolkata").strip()
+
+    @staticmethod
+    def tmdb_api_keys() -> list[str]:
+        """Ordered unique TMDB v3 API keys (multi-key rotation support)."""
+        raw = []
+        multi = (Config.TMDB_API_KEYS or "").strip()
+        single = (Config.TMDB_API_KEY or "").strip()
+        if multi:
+            for part in multi.replace(";", ",").split(","):
+                k = part.strip()
+                if k:
+                    raw.append(k)
+        if single:
+            raw.append(single)
+        seen = set()
+        out: list[str] = []
+        for k in raw:
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
 
 
 def validate_config(*, strict: bool = True) -> list[str]:
