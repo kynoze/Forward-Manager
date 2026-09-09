@@ -76,11 +76,25 @@ async def acquire_my_bot(user_id: int, bot_id: str, dep: str) -> Tuple[bool, str
 
         b = await get_bot(user_id, str(bot_id))
         if not b:
-            _last_error[key] = "Bot not found in My Bots"
+            # Fallback: scan My Bots (id type / format mismatches after restarts)
+            try:
+                from database import get_user_bots
+                for cand in await get_user_bots(user_id):
+                    if str(cand.get("bot_id") or "") == str(bot_id):
+                        b = cand
+                        break
+            except Exception:
+                pass
+        if not b:
+            _last_error[key] = f"Bot not found in My Bots (id={bot_id})"
             return False, _last_error[key]
-        token = load_secret(b.get("bot_token") or "")
+        try:
+            token = load_secret(b.get("bot_token") or "")
+        except Exception as e:
+            _last_error[key] = f"Token decrypt failed: {e}"
+            return False, _last_error[key]
         if not token:
-            _last_error[key] = "Could not read bot token"
+            _last_error[key] = "Could not read bot token (empty)"
             return False, _last_error[key]
         mgr = get_user_bot_manager()
         if mgr.is_running(user_id, bot_id):
@@ -201,11 +215,17 @@ async def release_my_account(user_id: int, account_id: str, dep: str) -> None:
 # ── CNL reconcile ─────────────────────────────────────────────────────────
 
 async def reconcile_cnl_user(user_id: int) -> None:
-    """Rebuild deps from enabled CNL rules and start/stop clients accordingly."""
+    """Rebuild deps from enabled CNL rules + Global Copy; start/stop clients.
+
+    Must be safe to call on every process start so enabled rules keep
+    forwarding after management-bot restart/redeploy without a manual
+    disable→enable toggle.
+    """
     from core.cnl.db import get_cnl
 
     cnl = await get_cnl(user_id)
     if not cnl:
+        logger.warning("reconcile_cnl_user: no CNL DB for user %s", user_id)
         return
     try:
         rules = await cnl.forward_rules.find({"owner_id": int(user_id)}).to_list(1000)
@@ -215,8 +235,20 @@ async def reconcile_cnl_user(user_id: int) -> None:
 
     wanted_bots: Dict[str, Set[str]] = {}
     wanted_accs: Dict[str, Set[str]] = {}
+    # Fallback selected bots when a rule is user_bot but missing my_bot_id
+    fallback_bot_ids: list = []
+    try:
+        ub = await cnl.user_bots.find_one({"user_id": int(user_id)}) or {}
+        fallback_bot_ids = [str(x) for x in (ub.get("selected_bot_ids") or []) if x]
+        mid = ub.get("main_bot_id")
+        if mid and str(mid) not in fallback_bot_ids:
+            fallback_bot_ids.append(str(mid))
+    except Exception:
+        fallback_bot_ids = []
+
     for r in rules:
-        if not r.get("enabled", True):
+        # Treat missing enabled as True (legacy docs)
+        if r.get("enabled") is False:
             continue
         sid, tid = r.get("source_chat_id"), r.get("target_chat_id")
         if sid is None or tid is None:
@@ -227,10 +259,35 @@ async def reconcile_cnl_user(user_id: int) -> None:
             bid = r.get("my_bot_id") or r.get("exec_bot_id")
             if bid:
                 wanted_bots.setdefault(str(bid), set()).add(dep)
+            elif fallback_bot_ids:
+                # Legacy rule without explicit bot — bind first selected bot
+                wanted_bots.setdefault(fallback_bot_ids[0], set()).add(dep)
+            else:
+                logger.warning(
+                    "reconcile: enabled bot rule %s→%s user %s has no my_bot_id",
+                    sid, tid, user_id,
+                )
         elif via in ("user_account", "user"):
             aid = r.get("my_account_id") or r.get("exec_account_id")
             if aid:
                 wanted_accs.setdefault(str(aid), set()).add(dep)
+            else:
+                logger.warning(
+                    "reconcile: enabled account rule %s→%s user %s has no my_account_id",
+                    sid, tid, user_id,
+                )
+
+    # Global Copy (must survive restart the same way as rules)
+    try:
+        gc = await cnl.get_global_copy(user_id)
+        if gc and gc.get("enabled") and gc.get("my_account_id"):
+            wanted_accs.setdefault(str(gc["my_account_id"]), set()).add("cnl:gcopy")
+            logger.info(
+                "reconcile: Global Copy ON user=%s account=%s",
+                user_id, gc.get("my_account_id"),
+            )
+    except Exception:
+        logger.exception("reconcile_cnl_user global_copy user=%s", user_id)
 
     # Apply bot deps
     async with _lock:
@@ -245,7 +302,17 @@ async def reconcile_cnl_user(user_id: int) -> None:
 
     for bid, deps in wanted_bots.items():
         for dep in deps:
-            await acquire_my_bot(user_id, bid, dep)
+            ok, msg = await acquire_my_bot(user_id, bid, dep)
+            if not ok:
+                logger.warning(
+                    "reconcile: bot start failed user=%s bot=%s dep=%s: %s",
+                    user_id, bid, dep, msg,
+                )
+            else:
+                logger.info(
+                    "reconcile: bot ready user=%s bot=%s dep=%s (%s)",
+                    user_id, bid, dep, msg,
+                )
 
     # stop bots for this user with no deps left
     from core.cnl.bots import get_user_bot_manager
@@ -282,7 +349,17 @@ async def reconcile_cnl_user(user_id: int) -> None:
 
     for aid, deps in wanted_accs.items():
         for dep in deps:
-            await acquire_my_account(user_id, aid, dep)
+            ok, msg = await acquire_my_account(user_id, aid, dep)
+            if not ok:
+                logger.warning(
+                    "reconcile: account start failed user=%s acc=%s dep=%s: %s",
+                    user_id, aid, dep, msg,
+                )
+            else:
+                logger.info(
+                    "reconcile: account ready user=%s acc=%s dep=%s (%s)",
+                    user_id, aid, dep, msg,
+                )
 
     # Stop each account that is no longer wanted (per account_id, independent)
     try:
@@ -371,13 +448,12 @@ async def on_cnl_rule_deleted(user_id: int, rule: dict) -> None:
 
 
 async def reconcile_all_cnl() -> None:
-    from core.cnl.gate import list_enabled_gates
-    gates = await list_enabled_gates()
-    for g in gates:
+    from core.cnl.gate import list_cnl_owner_ids
+    for uid in await list_cnl_owner_ids():
         try:
-            await reconcile_cnl_user(int(g["user_id"]))
+            await reconcile_cnl_user(int(uid))
         except Exception:
-            logger.exception("reconcile_all_cnl user %s", g.get("user_id"))
+            logger.exception("reconcile_all_cnl user %s", uid)
 
 
 async def reconcile_wroxen() -> None:
