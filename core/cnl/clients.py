@@ -63,15 +63,20 @@ class CnlClientManager:
         client.add_handler(MessageHandler(_wrapper, filters.incoming & ~filters.service), group=50)
 
     def is_running(self, user_id: int, account_id: Optional[str] = None) -> bool:
-        k = self._key(user_id, account_id)
-        c = self._clients.get(k)
-        if c and getattr(c, "is_connected", False):
-            return True
-        # legacy single-client key
+        uid = int(user_id)
         if account_id:
-            c2 = self._clients.get(str(int(user_id)))
+            k = self._key(uid, account_id)
+            c = self._clients.get(k)
+            if c and getattr(c, "is_connected", False):
+                return True
+            c2 = self._clients.get(str(uid))
             return bool(c2 and getattr(c2, "is_connected", False))
-        return False
+        # Any client for this user ("uid" or "uid:account_id")
+        return any(
+            getattr(c, "is_connected", False)
+            for k, c in self._clients.items()
+            if k == str(uid) or k.startswith(f"{uid}:")
+        )
 
     def get_client(self, user_id: int, account_id: Optional[str] = None) -> Optional[Client]:
         k = self._key(user_id, account_id)
