@@ -139,8 +139,11 @@ def pagination_keyboard(
     page: int,
     pages: int,
     owner_id: int,
+    *,
+    include_trending: bool = True,
 ) -> Optional[InlineKeyboardMarkup]:
-    qhash = hashlib.md5(query.strip().lower().encode()).hexdigest()[:12]
+    qhash = hashlib.md5(query.strip().lower().encode()).hexdigest()[:8]
+    rows = []
     row = []
     if page > 1:
         row.append(
@@ -156,9 +159,21 @@ def pagination_keyboard(
                 callback_data=f"wxpage:{wroxen_id}:{page + 1}:{owner_id}:{qhash}",
             )
         )
-    if not row:
+    if row:
+        rows.append(row)
+    if include_trending:
+        # Compact callback (Telegram 64-byte limit). qhash lets ◀️ Back restore results.
+        qh = remember_query(query) if query else ""
+        tr_cb = f"wxtr:m:{wroxen_id}:{owner_id}:{qh}" if qh else f"wxtr:m:{wroxen_id}:{owner_id}"
+        rows.append([
+            InlineKeyboardButton(
+                "📈 Trending",
+                callback_data=tr_cb,
+            )
+        ])
+    if not rows:
         return None
-    return InlineKeyboardMarkup([row])
+    return InlineKeyboardMarkup(rows)
 
 
 # Map qhash -> query text for pagination (same process)
@@ -166,7 +181,7 @@ _QUERY_MAP: Dict[str, str] = {}
 
 
 def remember_query(query: str) -> str:
-    qhash = hashlib.md5(query.strip().lower().encode()).hexdigest()[:12]
+    qhash = hashlib.md5(query.strip().lower().encode()).hexdigest()[:8]
     _QUERY_MAP[qhash] = query.strip()
     return qhash
 
