@@ -1053,6 +1053,24 @@ async def jobs_callbacks(client: Client, query: CallbackQuery):
         await safe_edit(query, text, job_controls_keyboard(job))
         return await safe_answer(query)
 
+    if data.startswith("job:rename:"):
+        job_id = data.split(":")[2]
+        job = await get_job_scoped(user_id, job_id)
+        if not job:
+            return await safe_answer(query, "Job not found", True)
+        set_state(client, "job_rename_state", user_id, {"job_id": job_id})
+        await safe_edit(
+            query,
+            f"**✏️ Rename Job**\n\n"
+            f"Current: **{job.get('name') or job_id}**\n\n"
+            f"Send the new name.\n"
+            f"Send /cancel to abort.",
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton("« Cancel", callback_data=f"job:open:{job_id}")
+            ]]),
+        )
+        return await safe_answer(query)
+
     if data.startswith("job:mon:"):
         job_id = data.split(":")[2]
         job = await get_job_scoped(user_id, job_id)
@@ -1973,10 +1991,18 @@ async def job_create_callbacks(client: Client, query: CallbackQuery):
             if not ok_p:
                 return await safe_answer(query, msg_p[:180], True)
 
+            src_title = (state.get("source_title") or "").strip()
+            if not src_title or src_title in ("Unknown", "Source", "—"):
+                try:
+                    ch = await client.get_chat(state.get("source_chat_id"))
+                    src_title = (getattr(ch, "title", None) or getattr(ch, "first_name", None) or src_title or "Source")
+                except Exception:
+                    src_title = src_title or "Source"
+                state["source_title"] = src_title
             job = await create_job(
                 user_id=user_id,
                 source_chat_id=state.get("source_chat_id"),
-                source_title=state.get("source_title", "Unknown"),
+                source_title=src_title,
                 target_chat_ids=state.get("selected_targets", []),
                 method=state.get("method"),
                 account_ids=state.get("selected_accounts"),
@@ -1987,7 +2013,7 @@ async def job_create_callbacks(client: Client, query: CallbackQuery):
                 pre_index_target_duplicates=bool(state.get("pre_index_target_duplicates")),
                 name=(
                     (state.get("custom_name") or "").strip()
-                    or await next_job_name_for_source(user_id, state.get("source_title") or "Source")
+                    or await next_job_name_for_source(user_id, src_title or "Source")
                 ),
             )
         except Exception:

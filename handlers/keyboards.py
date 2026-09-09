@@ -93,7 +93,8 @@ def targets_list_keyboard(targets: List[Dict]) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🔄 Refresh", callback_data="tg:list")
     ])
     buttons.append([
-        InlineKeyboardButton("« Back to Dashboard", callback_data="dash:home")
+        InlineKeyboardButton("« Back", callback_data="dash:existing"),
+        InlineKeyboardButton("🏠 Dashboard", callback_data="dash:home"),
     ])
     return InlineKeyboardMarkup(buttons)
 
@@ -108,7 +109,10 @@ def target_settings_keyboard(target: Dict[str, Any]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🆕 Future Posts", callback_data=f"st:cat:{chat_id}:future")],
         [InlineKeyboardButton("👁 View Configuration", callback_data=f"st:view:{chat_id}")],
         [InlineKeyboardButton("♻️ Reset Settings", callback_data=f"st:reset:{chat_id}")],
-        [InlineKeyboardButton("« Target", callback_data=f"tg:open:{chat_id}")],
+        [
+            InlineKeyboardButton("« Target", callback_data=f"tg:open:{chat_id}"),
+            InlineKeyboardButton("🏠 Dashboard", callback_data="dash:home"),
+        ],
     ]
     return InlineKeyboardMarkup(buttons)
 
@@ -125,7 +129,10 @@ def target_detail_keyboard(target: Dict[str, Any]) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🗑 Remove", callback_data=f"tg:delete:{chat_id}"),
             InlineKeyboardButton("🔄 Refresh", callback_data=f"tg:open:{chat_id}"),
         ],
-        [InlineKeyboardButton("« Back", callback_data="tg:list")],
+        [
+            InlineKeyboardButton("« Back", callback_data="tg:list"),
+            InlineKeyboardButton("🏠 Dashboard", callback_data="dash:home"),
+        ],
     ])
 
 
@@ -255,7 +262,8 @@ def accounts_list_keyboard(accounts: List[Dict]) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🔄 Refresh", callback_data="acc:list")
     ])
     buttons.append([
-        InlineKeyboardButton("« Back to Dashboard", callback_data="dash:home")
+        InlineKeyboardButton("« Back", callback_data="dash:home"),
+        InlineKeyboardButton("🏠 Dashboard", callback_data="dash:home"),
     ])
     return InlineKeyboardMarkup(buttons)
 
@@ -338,7 +346,8 @@ def bots_list_keyboard(bots: List[Dict]) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🔄 Refresh", callback_data="bot:list")
     ])
     buttons.append([
-        InlineKeyboardButton("« Back to Dashboard", callback_data="dash:home")
+        InlineKeyboardButton("« Back", callback_data="dash:home"),
+        InlineKeyboardButton("🏠 Dashboard", callback_data="dash:home"),
     ])
     return InlineKeyboardMarkup(buttons)
 
@@ -423,7 +432,8 @@ def jobs_list_keyboard(
         InlineKeyboardButton("📢 Jobs Log Channel", callback_data="jlog:cfg"),
     ])
     buttons.append([
-        InlineKeyboardButton("« Back to Dashboard", callback_data="dash:home")
+        InlineKeyboardButton("« Back", callback_data="dash:existing"),
+        InlineKeyboardButton("🏠 Dashboard", callback_data="dash:home"),
     ])
     return InlineKeyboardMarkup(buttons)
 
@@ -449,7 +459,10 @@ def job_detail_keyboard(job: Dict[str, Any]) -> InlineKeyboardMarkup:
     ])
     buttons.append([
         InlineKeyboardButton("🗑 Delete Job", callback_data=f"job:delete:{job_id}"),
-        InlineKeyboardButton("« Back", callback_data="job:list")
+    ])
+    buttons.append([
+        InlineKeyboardButton("« Back", callback_data="job:list"),
+        InlineKeyboardButton("🏠 Dashboard", callback_data="dash:home"),
     ])
     return InlineKeyboardMarkup(buttons)
 
@@ -763,7 +776,10 @@ def indexing_home_keyboard(
     rows.append([InlineKeyboardButton("📊 Statistics", callback_data="idx:stats")])
     if db_ok:
         rows.append([InlineKeyboardButton("🗑 Clear Index Database", callback_data="idx:clear")])
-    rows.append([InlineKeyboardButton("« Back to Dashboard", callback_data="dash:home")])
+    rows.append([
+        InlineKeyboardButton("« Back", callback_data="dash:home"),
+        InlineKeyboardButton("🏠 Dashboard", callback_data="dash:home"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 

@@ -43,6 +43,98 @@ from handlers.ui import safe_edit, safe_answer
 logger = logging.getLogger(__name__)
 
 
+async def _resolve_chat_title(
+    client,
+    user_id: int,
+    chat_id,
+    message=None,
+    *,
+    bot_id: str | None = None,
+) -> str:
+    """Resolve real chat title using ONLY the selected Wroxen search bot.
+
+    That bot must be able to see the target (admin in target group/channel).
+    Management bot and user accounts are NOT used for title.
+    """
+    def _ok(s) -> str:
+        s = (s or "").strip()
+        if not s:
+            return ""
+        if s.lstrip("-").isdigit():
+            return ""
+        return s
+
+    title = ""
+    # Forward payload is still useful (no API call) if user forwarded from target
+    if message is not None:
+        fwd = getattr(message, "forward_from_chat", None)
+        if fwd is not None:
+            try:
+                if int(getattr(fwd, "id", 0) or 0) == int(chat_id):
+                    title = _ok(
+                        getattr(fwd, "title", None)
+                        or getattr(fwd, "first_name", None)
+                        or getattr(fwd, "username", None)
+                    )
+            except (TypeError, ValueError):
+                pass
+        if not title:
+            sc = getattr(message, "sender_chat", None)
+            if sc is not None:
+                try:
+                    if int(getattr(sc, "id", 0) or 0) == int(chat_id):
+                        title = _ok(
+                            getattr(sc, "title", None) or getattr(sc, "username", None)
+                        )
+                except (TypeError, ValueError):
+                    pass
+    if title:
+        return title
+
+    # ONLY the selected search bot
+    bot_client = None
+    bid = bot_id
+    if not bid:
+        try:
+            from core.state import get_state
+            st = get_state(client, "wroxen_state", user_id) or {}
+            bid = st.get("bot_id")
+        except Exception:
+            bid = None
+    if bid:
+        try:
+            from database import get_bot
+            from core.job_worker import get_bot_client
+            bot_doc = await get_bot(user_id, str(bid))
+            if bot_doc:
+                bot_client = await get_bot_client(bot_doc)
+        except Exception:
+            logger.debug("wroxen title: bot client failed", exc_info=True)
+
+    if bot_client is not None:
+        try:
+            chat = await bot_client.get_chat(chat_id)
+            title = _ok(
+                getattr(chat, "title", None)
+                or getattr(chat, "first_name", None)
+                or getattr(chat, "username", None)
+            )
+            if title:
+                return title
+        except Exception as e:
+            logger.warning(
+                "Wroxen title: selected bot cannot read chat %s (%s). "
+                "Bot must be admin in target.",
+                chat_id,
+                type(e).__name__,
+            )
+    else:
+        logger.warning("Wroxen title: no selected bot client for chat %s", chat_id)
+
+    return str(chat_id)
+
+
+
 def _wx_home_kb(has_db: bool) -> InlineKeyboardMarkup:
     rows = []
     if not has_db:
@@ -201,10 +293,56 @@ async def wroxen_callbacks(client: Client, query: CallbackQuery):
         if not configs:
             await query.answer("No Wroxen configs yet", show_alert=True)
             return await show_wroxen_home(client, query)
+        # Resolve target group/channel TITLE (not chat id) for button labels
+        try:
+            from database import get_user_targets, update_wroxen_config
+            tmap = {
+                int(t["chat_id"]): (t.get("title") or "").strip()
+                for t in (await get_user_targets(user_id) or [])
+                if t.get("chat_id") is not None
+            }
+        except Exception:
+            tmap = {}
+            update_wroxen_config = None  # type: ignore
         rows = []
         for c in configs:
             mark = "🟢" if c.get("enabled", True) else "🔴"
-            name = (c.get("target_title") or c.get("name") or str(c.get("target_chat_id") or c["wroxen_id"]))[:32]
+            tid = c.get("target_chat_id")
+            try:
+                tid_i = int(tid) if tid is not None else None
+            except (TypeError, ValueError):
+                tid_i = None
+            name = (c.get("target_title") or c.get("name") or "").strip()
+            # Stored value is often the numeric id string — treat as missing
+            if not name or name.lstrip("-").isdigit() or name == str(tid):
+                name = ""
+            if not name and tid_i is not None and tmap.get(tid_i):
+                name = tmap[tid_i]
+            if not name and tid is not None:
+                try:
+                    name = await _resolve_chat_title(
+                        client,
+                        user_id,
+                        tid,
+                        None,
+                        bot_id=c.get("bot_id"),
+                    )
+                    if name and str(name).lstrip("-").isdigit():
+                        name = ""
+                    if name and update_wroxen_config and c.get("wroxen_id"):
+                        try:
+                            await update_wroxen_config(
+                                user_id,
+                                c["wroxen_id"],
+                                {"target_title": name, "name": name},
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    name = ""
+            if not name:
+                name = str(tid or c.get("wroxen_id") or "?")
+            name = str(name).strip()[:32]
             rows.append([
                 InlineKeyboardButton(
                     f"{mark} {name}",
@@ -601,13 +739,20 @@ async def _start_index_job(client: Client, query: CallbackQuery, user_id: int, s
         if _err:
             return await query.answer(_err, show_alert=True)
 
+        ttitle = str(st.get("target_title") or "").strip()
+        if not ttitle or ttitle.lstrip("-").isdigit():
+            ttitle = await _resolve_chat_title(
+                client, user_id, st.get("target_chat_id"), None, bot_id=st.get("bot_id")
+            )
+        st["target_title"] = ttitle
         cfg = await create_wroxen_config(
             user_id,
             bot_id=bot_id,
             source_chat_id=int(st["source_chat_id"]),
             source_title=str(st.get("source_title") or st["source_chat_id"]),
             target_chat_id=int(st["target_chat_id"]),
-            target_title=str(st.get("target_title") or st["target_chat_id"]),
+            target_title=ttitle,
+            name=ttitle if ttitle and not str(ttitle).lstrip("-").isdigit() else None,
             index_account_id=st.get("index_account_id"),
         )
         wid = cfg["wroxen_id"]
@@ -780,26 +925,31 @@ async def handle_wroxen_text(client: Client, message: Message) -> bool:
             if chat_id is None:
                 await message.reply("❌ Forward a message from target group or send group link.")
                 return True
-            try:
-                chat = await client.get_chat(chat_id)
-                title = getattr(chat, "title", None) or str(chat_id)
-            except Exception:
-                title = str(chat_id)
+            # Prefer title from forward payload / accounts — not raw id
+            if message.forward_from_chat and chat_id is None:
+                chat_id = message.forward_from_chat.id
+            title = await _resolve_chat_title(client, user_id, chat_id, message, bot_id=st.get("bot_id"))
             st["target_chat_id"] = int(chat_id)
             st["target_title"] = title
+            # Source + last_msg already set earlier → only ask skip once
             st["step"] = "await_skip"
             set_state(client, "wroxen_state", user_id, st)
+            note = ""
+            if str(title).lstrip("-").isdigit():
+                note = (
+                    chr(10) + chr(10)
+                    + "⚠️ Could not read **chat title** with your selected search bot."
+                    + chr(10)
+                    + "Make that bot **admin** in the target group, then continue "
+                    + "(name will refresh on My Wroxen)."
+                )
             await message.reply(
-                f"Target: **{title}** (`{chat_id}`)\n\n"
-                "Now send the **last message** from **source** (or t.me link) for initial index range.\n"
-                "You already set source — enter **skip count** (0 = none):",
+                (
+                    f"Target: **{title}** (`{chat_id}`)" + note + chr(10) + chr(10)
+                    + "✏️ Enter number of messages to **skip from start** (0 = none):"
+                ),
                 parse_mode=ParseMode.MARKDOWN,
             )
-            # If source already known, go to skip
-            if st.get("source_chat_id") and st.get("last_msg_id"):
-                st["step"] = "await_skip"
-                set_state(client, "wroxen_state", user_id, st)
-                await message.reply("✏️ Enter number of messages to **skip from start** (0 = none):")
             return True
 
         if chat_id is None or msg_id is None:
@@ -813,7 +963,7 @@ async def handle_wroxen_text(client: Client, message: Message) -> bool:
 
         if step == "await_source":
             st["source_chat_id"] = int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
-            st["source_title"] = title
+            st["source_title"] = await _resolve_chat_title(client, user_id, chat_id, message, bot_id=st.get("bot_id")) or title
             st["last_msg_id"] = int(msg_id)
             st["step"] = "await_target"
             set_state(client, "wroxen_state", user_id, st)
