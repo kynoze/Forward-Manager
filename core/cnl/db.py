@@ -314,31 +314,95 @@ class CnlDatabase:
             words = [w.strip() for w in words.replace(",", "\n").split("\n") if w.strip()]
         return [str(w).strip().lower() for w in words if str(w).strip()]
 
-    def _validate_rule_data(self, data: dict) -> dict:
-        out = dict(data)
-        pos = (out.get("caption_position") or "end").lower()
-        out["caption_position"] = pos if pos in ALLOWED_CAPTION_POSITIONS else "end"
-        via = (out.get("forward_via") or "user_bot").lower()
-        out["forward_via"] = via if via in ALLOWED_FORWARD_VIA else "user_bot"
-        types = out.get("allowed_types") or ["all"]
-        if isinstance(types, str):
-            types = [t.strip().lower() for t in types.replace(",", " ").split() if t.strip()]
-        out["allowed_types"] = [t for t in types if t in ALLOWED_MEDIA_TYPES] or ["all"]
-        out["block_words"] = self._normalize_word_list(out.get("block_words"))
-        out["whitelist_words"] = self._normalize_word_list(out.get("whitelist_words"))
-        out["delay"] = max(0, int(out.get("delay") or 0))
-        out["enabled"] = bool(out.get("enabled", True))
-        out["forward_tag"] = bool(out.get("forward_tag", False))
-        out["remove_links"] = bool(out.get("remove_links", False))
-        out["anti_dupe"] = bool(out.get("anti_dupe", False))
-        out["remove_old_caption"] = bool(out.get("remove_old_caption", False))
-        if out.get("my_bot_id") is not None:
-            out["my_bot_id"] = str(out["my_bot_id"]) if out["my_bot_id"] else None
-        if out.get("my_account_id") is not None:
-            out["my_account_id"] = str(out["my_account_id"]) if out["my_account_id"] else None
-        if "content_type" in out:
+    def _sanitize_rule_field(self, key: str, value):
+        """Normalize a single rule field. Used for partial updates so missing
+        keys are never rewritten to defaults (which was wiping other settings)."""
+        if key == "caption_position":
+            pos = (value or "end").lower()
+            return pos if pos in ALLOWED_CAPTION_POSITIONS else "end"
+        if key == "forward_via":
+            via = (value or "user_bot").lower()
+            return via if via in ALLOWED_FORWARD_VIA else "user_bot"
+        if key == "allowed_types":
+            types = value or ["all"]
+            if isinstance(types, str):
+                types = [t.strip().lower() for t in types.replace(",", " ").split() if t.strip()]
+            return [t for t in types if t in ALLOWED_MEDIA_TYPES] or ["all"]
+        if key in ("block_words", "whitelist_words"):
+            return self._normalize_word_list(value)
+        if key == "delay":
+            return max(0, int(value or 0))
+        if key in (
+            "enabled", "forward_tag", "remove_links", "anti_dupe",
+            "remove_old_caption",
+        ):
+            return bool(value)
+        if key in ("my_bot_id", "my_account_id"):
+            return str(value) if value else None
+        if key == "content_type":
             from core.content_type import normalize_content_type
-            out["content_type"] = normalize_content_type(out.get("content_type"))
+            return normalize_content_type(value)
+        if key == "replacements":
+            return value or []
+        if key == "buttons":
+            return value
+        if key in ("add_caption", "custom_caption"):
+            return value
+        return value
+
+    def _validate_rule_data(self, data: dict, *, partial: bool = False) -> dict:
+        """Validate rule fields.
+
+        partial=False (create): inject safe defaults for core flags/types.
+        partial=True (update): only sanitize keys present in ``data`` — never
+        invent defaults for absent keys (that was clearing block/whitelist/etc.).
+        """
+        skip = {"_id", "created_at", "updated_at"}
+        if partial:
+            out = {}
+            for k, v in data.items():
+                if k in skip:
+                    continue
+                out[k] = self._sanitize_rule_field(k, v)
+            return out
+
+        out = dict(data)
+        # Full document path (create) — ensure required defaults exist
+        defaults = {
+            "caption_position": "end",
+            "forward_via": "user_bot",
+            "allowed_types": ["all"],
+            "block_words": [],
+            "whitelist_words": [],
+            "delay": 0,
+            "enabled": True,
+            "forward_tag": False,
+            "remove_links": False,
+            "anti_dupe": False,
+            "remove_old_caption": False,
+            "content_type": "all",
+            "replacements": [],
+            "buttons": None,
+            "add_caption": None,
+            "custom_caption": None,
+        }
+        for k, default in defaults.items():
+            if k not in out:
+                out[k] = default
+        for k in list(out.keys()):
+            if k in skip:
+                continue
+            if k in (
+                "source_chat_id", "target_chat_id", "owner_id",
+                "my_bot_id", "my_account_id", "last_error",
+            ) or k in defaults or k in (
+                "add_caption", "custom_caption", "buttons", "replacements",
+                "content_type",
+            ):
+                try:
+                    out[k] = self._sanitize_rule_field(k, out.get(k))
+                except Exception:
+                    pass
         return out
 
     def _invalidate_source_cache(self, source_chat_id=None):
@@ -371,9 +435,16 @@ class CnlDatabase:
         return data
 
     async def update_forward_rule(self, source_chat_id, target_chat_id, updates: dict, owner_id=None):
-        clean = self._validate_rule_data({**updates, "source_chat_id": source_chat_id, "target_chat_id": target_chat_id})
-        clean.pop("source_chat_id", None)
-        clean.pop("target_chat_id", None)
+        # Partial update: only $set keys the caller provided. Never rewrite
+        # unrelated fields to defaults (was wiping block/whitelist/delay/types).
+        payload = dict(updates or {})
+        payload.pop("source_chat_id", None)
+        payload.pop("target_chat_id", None)
+        payload.pop("owner_id", None)
+        payload.pop("_id", None)
+        clean = self._validate_rule_data(payload, partial=True)
+        if not clean:
+            return
         clean["updated_at"] = datetime.now(timezone.utc)
         q = {"source_chat_id": int(source_chat_id), "target_chat_id": int(target_chat_id)}
         if owner_id is not None:
