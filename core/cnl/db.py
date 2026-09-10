@@ -297,8 +297,30 @@ class CnlDatabase:
         await self.users.update_one({"user_id": int(user_id)}, {"$set": update}, upsert=True)
 
     async def update_global_copy_filters(self, user_id, updates: dict):
+        """Partial update only — never rewrite unrelated global_copy fields.
+
+        Same guarantee as update_forward_rule(partial=True): saving block_words
+        must not clear whitelist_words / remove_links / delay / etc.
+        """
         allowed = set(GLOBAL_COPY_FILTER_KEYS) | {"my_account_id"}
-        clean = {k: v for k, v in updates.items() if k in allowed}
+        clean = {}
+        for k, v in (updates or {}).items():
+            if k not in allowed:
+                continue
+            # Reuse rule field sanitizers where the key matches
+            if k in (
+                "block_words", "whitelist_words", "remove_links", "anti_dupe",
+                "forward_tag", "remove_old_caption", "delay", "allowed_types",
+                "caption_position", "content_type", "replacements", "buttons",
+                "add_caption", "custom_caption", "my_account_id",
+            ):
+                clean[k] = self._sanitize_rule_field(k, v)
+            elif k in ("enabled",):
+                clean[k] = bool(v)
+            elif k == "target_chat_id":
+                clean[k] = int(v) if v else None
+            else:
+                clean[k] = v
         if not clean:
             return
         set_ops = {f"global_copy.{k}": v for k, v in clean.items()}

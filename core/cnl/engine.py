@@ -12,8 +12,13 @@ Caption priority:
 2. add_caption + caption_position (start / end / end_with_gap)
 3. Original text with replacements / remove_links / remove_old_caption
 
+When none of the above modify the text, messages are copied as-is
+(copy_message / copy_media_group) so source formatting is preserved:
+bold, italic, underline, strike, spoiler, code, pre, links, blockquote,
+and other Kurigram MessageEntity types.
+
 Anti-dupe: media file_unique_id only (pure text never hashed).
-Albums: buffer ALBUM_WAIT_SECONDS then send_media_group.
+Albums: buffer ALBUM_WAIT_SECONDS then send_media_group (or copy_media_group).
 """
 from __future__ import annotations
 
