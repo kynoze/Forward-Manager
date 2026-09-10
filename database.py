@@ -1227,6 +1227,7 @@ async def create_job(
             "block_words": [],
             "whitelist_enabled": False,
             "whitelist_words": [],
+            "content_type": "all",
         },
         "created_at": now,
         "updated_at": now
