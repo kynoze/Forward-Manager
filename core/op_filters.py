@@ -28,10 +28,13 @@ def default_op_filters() -> Dict[str, Any]:
         "block_words": [],
         "whitelist_enabled": False,
         "whitelist_words": [],
+        "content_type": "all",
     }
 
 
 def normalize_op_filters(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    from core.content_type import normalize_content_type
+
     base = default_op_filters()
     if not isinstance(raw, dict):
         return base
@@ -49,6 +52,8 @@ def normalize_op_filters(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if wl is None:
         wl = raw.get("whitelist") or []
     base["whitelist_words"] = [str(w) for w in wl if w]
+    # Missing field (legacy jobs) → all
+    base["content_type"] = normalize_content_type(raw.get("content_type", "all"))
     return base
 
 
@@ -69,4 +74,7 @@ def merge_settings_for_forward(
         settings["block_words"] = list(op["block_words"])
         settings["whitelist_mode"] = bool(op["whitelist_enabled"])
         settings["whitelist"] = list(op["whitelist_words"])
+        settings["content_type"] = op.get("content_type") or "all"
+    else:
+        settings.setdefault("content_type", "all")
     return settings

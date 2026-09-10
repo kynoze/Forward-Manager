@@ -18,6 +18,17 @@ def should_process_message(message: Message, settings: Dict[str, Any]) -> tuple[
         if not allow_all and "text" not in allowed_media:
             return False, "media_type:text"
 
+    # Movie / Series filter — after media type, before block/whitelist.
+    # Missing content_type (legacy jobs) → "all".
+    from core.content_type import apply_content_type_filter, content_filter_log_line, normalize_content_type
+    import logging
+    ct = normalize_content_type(settings.get("content_type", "all"))
+    if ct != "all":
+        ok, reason = apply_content_type_filter(message, ct)
+        if not ok:
+            logging.getLogger(__name__).debug(content_filter_log_line(reason.split(":")[-1], ct))
+            return False, reason
+
     text_content = message.caption or message.text or ""
     text_lower = text_content.lower()
 
