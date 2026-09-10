@@ -270,6 +270,7 @@ class CnlDatabase:
             "add_caption": None, "caption_position": "end", "custom_caption": None,
             "remove_old_caption": False, "remove_links": False, "buttons": None,
             "delay": 0, "anti_dupe": False, "forward_tag": False, "my_account_id": None,
+            "content_type": "all",
         }
 
     async def get_global_copy(self, user_id) -> Optional[Dict[str, Any]]:
@@ -335,6 +336,9 @@ class CnlDatabase:
             out["my_bot_id"] = str(out["my_bot_id"]) if out["my_bot_id"] else None
         if out.get("my_account_id") is not None:
             out["my_account_id"] = str(out["my_account_id"]) if out["my_account_id"] else None
+        if "content_type" in out:
+            from core.content_type import normalize_content_type
+            out["content_type"] = normalize_content_type(out.get("content_type"))
         return out
 
     def _invalidate_source_cache(self, source_chat_id=None):
@@ -344,6 +348,7 @@ class CnlDatabase:
             self._rules_by_source_cache.pop(int(source_chat_id), None)
 
     async def create_forward_rule(self, source_chat_id, target_chat_id, owner_id, **kwargs):
+        kwargs.setdefault("content_type", "all")
         data = self._validate_rule_data({
             "source_chat_id": int(source_chat_id), "target_chat_id": int(target_chat_id),
             "owner_id": int(owner_id), **kwargs,
@@ -469,6 +474,12 @@ class CnlDatabase:
 
     async def set_anti_dupe(self, s, t, enabled, owner_id=None):
         await self.update_forward_rule(s, t, {"anti_dupe": bool(enabled)}, owner_id=owner_id)
+
+    async def set_content_type(self, s, t, content_type, owner_id=None):
+        from core.content_type import normalize_content_type
+        await self.update_forward_rule(
+            s, t, {"content_type": normalize_content_type(content_type)}, owner_id=owner_id
+        )
 
     # sessions
     async def save_user_session(self, user_id, session_string, phone_number, tg_user_id,

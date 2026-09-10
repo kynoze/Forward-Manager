@@ -13,18 +13,20 @@ ALLOWED_MEDIA_TYPES = {
     "audio", "voice", "text", "poll", "contact", "location", "venue",
 }
 ALLOWED_FORWARD_VIA = {"user_bot", "user_account"}
+ALLOWED_CONTENT_TYPES = {"all", "movies", "series"}
 RULE_FORWARD_PROJECTION = {
     "_id": 1, "source_chat_id": 1, "target_chat_id": 1, "owner_id": 1,
     "enabled": 1, "add_caption": 1, "caption_position": 1, "custom_caption": 1,
     "remove_old_caption": 1, "replacements": 1, "block_words": 1,
     "whitelist_words": 1, "buttons": 1, "forward_tag": 1, "remove_links": 1,
     "allowed_types": 1, "delay": 1, "anti_dupe": 1, "forward_via": 1,
+    "content_type": 1,
 }
 GLOBAL_COPY_FILTER_KEYS = {
     "block_words", "whitelist_words", "replacements", "add_caption",
     "caption_position", "custom_caption", "remove_old_caption", "remove_links",
     "buttons", "delay", "anti_dupe", "forward_tag", "allowed_types",
-    "target_chat_id", "enabled", "my_account_id",
+    "target_chat_id", "enabled", "my_account_id", "content_type",
 }
 NOT_CONFIGURED = (
     "⚠️ **CNL Database is not configured.**\n"

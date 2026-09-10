@@ -97,13 +97,50 @@ def process_original_text(original: Optional[str], rule: dict) -> Optional[str]:
     return processed
 
 
-def build_final_caption_and_entities(message: Message, rule: dict) -> Tuple[Optional[str], None]:
+def rule_modifies_caption(rule: dict) -> bool:
+    """True when any caption pipeline step would change source text/entities.
+
+    When False, CNL should copy the message as-is so bold / italic /
+    blockquote / spoiler / links / Kurigram rich entities survive.
+    """
+    if (rule.get("custom_caption") or "").strip():
+        return True
+    if (rule.get("add_caption") or "").strip():
+        return True
+    if rule.get("remove_old_caption"):
+        return True
+    if rule.get("remove_links"):
+        return True
+    reps = rule.get("replacements") or []
+    if reps:
+        return True
+    return False
+
+
+def build_final_caption_and_entities(
+    message: Message, rule: dict
+) -> Tuple[Optional[str], Optional[list]]:
+    """Return (text, entities).
+
+    If the rule does not modify caption text, return the original caption/text
+    and its entities so callers can preserve rich formatting.
+    """
     original = message.caption or message.text
+    original_entities = (
+        list(message.caption_entities)
+        if message.caption and message.caption_entities
+        else (list(message.entities) if message.text and message.entities else None)
+    )
+
+    # No caption pipeline changes → keep source text + entities intact
+    if not rule_modifies_caption(rule):
+        return original, original_entities
 
     template = (rule.get("custom_caption") or "").strip()
     if template:
         processed = process_original_text(original, rule)
         caption_value = processed if processed is not None else ""
+        # Template is plain/HTML text we build — entities from source no longer apply
         return template.replace("{caption}", caption_value), None
 
     processed = process_original_text(original, rule)
@@ -120,6 +157,10 @@ def build_final_caption_and_entities(message: Message, rule: dict) -> Tuple[Opti
         if pos == "end_with_gap":
             return f"{processed}\n\n{add}", None
         return f"{processed}\n{add}", None
+
+    # Replacements / link-strip changed the string → cannot keep old entities
+    if processed == original:
+        return processed or None, original_entities
     return processed or None, None
 
 
@@ -225,17 +266,25 @@ def get_album_hash(messages: List[Message]) -> Optional[str]:
 
 # ── send helpers ────────────────────────────────────────────────────────────
 
-def _to_input_media(message: Message, caption: Optional[str] = None):
+def _to_input_media(
+    message: Message,
+    caption: Optional[str] = None,
+    caption_entities: Optional[list] = None,
+):
+    kwargs = {"caption": caption}
+    if caption_entities:
+        kwargs["caption_entities"] = caption_entities
+        kwargs["parse_mode"] = None
     if message.photo:
-        return InputMediaPhoto(message.photo.file_id, caption=caption)
+        return InputMediaPhoto(message.photo.file_id, **kwargs)
     if message.video:
-        return InputMediaVideo(message.video.file_id, caption=caption)
+        return InputMediaVideo(message.video.file_id, **kwargs)
     if message.document:
-        return InputMediaDocument(message.document.file_id, caption=caption)
+        return InputMediaDocument(message.document.file_id, **kwargs)
     if message.animation:
-        return InputMediaAnimation(message.animation.file_id, caption=caption)
+        return InputMediaAnimation(message.animation.file_id, **kwargs)
     if message.audio:
-        return InputMediaAudio(message.audio.file_id, caption=caption)
+        return InputMediaAudio(message.audio.file_id, **kwargs)
     return None
 
 
@@ -248,28 +297,54 @@ async def _send_single(
     if delay > 0:
         await asyncio.sleep(min(delay, 300))
 
-    caption, _ = build_final_caption_and_entities(message, rule)
     markup = build_keyboard(rule.get("buttons"))
+    # No caption edits → copy as-is (bold, italic, blockquote, spoiler, links, …)
+    # copy_message preserves Kurigram/Telegram rich entities end-to-end.
+    if not rule_modifies_caption(rule):
+        try:
+            await client.copy_message(
+                target_id,
+                message.chat.id,
+                message.id,
+                reply_markup=markup,
+            )
+            if cnl:
+                await cnl.record_forward_success(source_id, target_id, owner_id)
+            return
+        except Exception:
+            # Fall through to send_* with entities if copy is not allowed
+            logger.debug("CNL copy_message fallback to send_*", exc_info=True)
+
+    caption, entities = build_final_caption_and_entities(message, rule)
+    # When entities present, disable parse_mode so Telegram uses MessageEntity list
+    send_kw: Dict[str, Any] = {"reply_markup": markup}
+    if entities:
+        send_kw["caption_entities"] = entities
+        send_kw["parse_mode"] = None
 
     try:
         if message.photo:
-            await client.send_photo(target_id, message.photo.file_id, caption=caption, reply_markup=markup)
+            await client.send_photo(target_id, message.photo.file_id, caption=caption, **send_kw)
         elif message.video:
-            await client.send_video(target_id, message.video.file_id, caption=caption, reply_markup=markup)
+            await client.send_video(target_id, message.video.file_id, caption=caption, **send_kw)
         elif message.document:
-            await client.send_document(target_id, message.document.file_id, caption=caption, reply_markup=markup)
+            await client.send_document(target_id, message.document.file_id, caption=caption, **send_kw)
         elif message.animation:
-            await client.send_animation(target_id, message.animation.file_id, caption=caption, reply_markup=markup)
+            await client.send_animation(target_id, message.animation.file_id, caption=caption, **send_kw)
         elif message.audio:
-            await client.send_audio(target_id, message.audio.file_id, caption=caption, reply_markup=markup)
+            await client.send_audio(target_id, message.audio.file_id, caption=caption, **send_kw)
         elif message.voice:
-            await client.send_voice(target_id, message.voice.file_id, caption=caption, reply_markup=markup)
+            await client.send_voice(target_id, message.voice.file_id, caption=caption, **send_kw)
         elif message.sticker:
             await client.send_sticker(target_id, message.sticker.file_id)
         elif message.text:
-            await client.send_message(target_id, caption or message.text, reply_markup=markup)
+            text_kw: Dict[str, Any] = {"reply_markup": markup}
+            if entities:
+                text_kw["entities"] = entities
+                text_kw["parse_mode"] = None
+            await client.send_message(target_id, caption or message.text or "", **text_kw)
         else:
-            await client.copy_message(target_id, message.chat.id, message.id)
+            await client.copy_message(target_id, message.chat.id, message.id, reply_markup=markup)
         if cnl:
             await cnl.record_forward_success(source_id, target_id, owner_id)
     except Exception:
@@ -294,12 +369,28 @@ async def _send_album(
             await cnl.record_forward_success(source_id, target_id, owner_id)
         return
 
+    # Unmodified captions → copy_media_group keeps original album formatting
+    if not rule_modifies_caption(rule) and messages:
+        try:
+            first = sorted(messages, key=lambda m: m.id)[0]
+            await client.copy_media_group(
+                target_id,
+                first.chat.id,
+                first.id,
+            )
+            if cnl:
+                await cnl.record_forward_success(source_id, target_id, owner_id)
+            return
+        except Exception:
+            logger.debug("CNL copy_media_group fallback to send_media_group", exc_info=True)
+
     media = []
     for i, msg in enumerate(sorted(messages, key=lambda m: m.id)):
         cap = None
+        ents = None
         if i == 0:
-            cap, _ = build_final_caption_and_entities(msg, rule)
-        item = _to_input_media(msg, caption=cap)
+            cap, ents = build_final_caption_and_entities(msg, rule)
+        item = _to_input_media(msg, caption=cap, caption_entities=ents)
         if item:
             media.append(item)
     if not media:
@@ -362,6 +453,19 @@ async def process_and_forward(client: Client, message: Message, rule: dict, owne
 
     if not is_type_allowed(msg_type, rule.get("allowed_types") or ["all"]):
         return
+
+    from core.content_type import (
+        apply_content_type_filter,
+        content_filter_log_line,
+        normalize_content_type,
+    )
+    ct_setting = normalize_content_type(rule.get("content_type", "all"))
+    # Albums: defer content-type until the group is complete (don't split albums).
+    if ct_setting != "all" and not message.media_group_id:
+        ok, reason = apply_content_type_filter(message, ct_setting)
+        if not ok:
+            logger.debug(content_filter_log_line(reason.split(":")[-1], ct_setting))
+            return
 
     text = message.caption or message.text
     if is_blocked(text, rule.get("block_words") or []):
@@ -490,6 +594,17 @@ async def _handle_album_message(client: Client, message: Message, rule: dict, ow
             if not is_whitelisted(text, rule.get("whitelist_words") or []):
                 await cnl.record_blocked(source_id, target_id, owner_id)
                 return
+            from core.content_type import (
+                apply_content_type_filter_album,
+                content_filter_log_line,
+                normalize_content_type,
+            )
+            ct_setting = normalize_content_type(rule.get("content_type", "all"))
+            if ct_setting != "all":
+                ok, reason = apply_content_type_filter_album(msgs, ct_setting)
+                if not ok:
+                    logger.debug(content_filter_log_line(reason.split(":")[-1], ct_setting))
+                    return
             claimed_hash = None
             if rule.get("anti_dupe"):
                 h = get_album_hash(msgs)
@@ -550,5 +665,6 @@ async def process_global_copy(client: Client, message: Message, owner_id: int):
         "forward_tag": gc.get("forward_tag", False),
         "forward_via": "user_account",
         "my_account_id": str(gc.get("my_account_id")),
+        "content_type": gc.get("content_type") or "all",
     }
     await process_and_forward(client, message, rule, owner_id)
