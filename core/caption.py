@@ -71,7 +71,8 @@ def apply_caption_text(original: str, settings: Dict[str, Any]) -> Optional[str]
         caption = _apply_replacements_cnl_style(caption, replacements)
 
     if settings.get("remove_links", False):
-        # Same tested cleaner as CNL Auto Post (core/cnl/clean.py)
+        # Jobs / Quick Forward / Target settings — identical to CNL Auto Post
+        # & Global Copy: single implementation in core/cnl/clean.py (no fork).
         from core.cnl.clean import clean_file_name
         caption = clean_file_name(caption) if caption else caption
 
