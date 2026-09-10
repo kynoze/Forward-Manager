@@ -137,6 +137,7 @@ async def _via_label(user_id: int, rule: Dict[str, Any]) -> str:
 
 
 async def _rule_summary(user_id: int, rule: Dict[str, Any]) -> str:
+    from core.content_type import content_type_label
     sid, tid = rule["source_chat_id"], rule["target_chat_id"]
     en = rule.get("enabled", True)
     types = rule.get("allowed_types") or ["all"]
@@ -147,6 +148,7 @@ async def _rule_summary(user_id: int, rule: Dict[str, Any]) -> str:
         f"Status: {'✅ Enabled' if en else '⏸ Disabled'}",
         f"**Forward Via:** {via_line}",
         f"Types: `{', '.join(types)}`",
+        f"Content: {content_type_label(rule.get('content_type'))}",
         f"Delay: `{rule.get('delay') or 0}s`",
         f"Anti-dupe: {'ON' if rule.get('anti_dupe') else 'OFF'}",
         f"Forward tag: {'ON' if rule.get('forward_tag') else 'OFF'}",
@@ -177,6 +179,7 @@ def _rule_settings_kb(rule: Dict[str, Any]) -> InlineKeyboardMarkup:
                               callback_data=f"cnl:rtog:{sid}:{tid}")],
         [InlineKeyboardButton("🚀 Forward Via", callback_data=f"cnl:rvia:{sid}:{tid}"),
          InlineKeyboardButton("📦 Forward Types", callback_data=f"cnl:rtype:{sid}:{tid}")],
+        [InlineKeyboardButton("🎬 Content Type", callback_data=f"cnl:rct:{sid}:{tid}")],
         [InlineKeyboardButton("✏️ Caption", callback_data=f"cnl:rcap:{sid}:{tid}"),
          InlineKeyboardButton("🔗 Remove Links", callback_data=f"cnl:rrl:{sid}:{tid}")],
         [InlineKeyboardButton("🚫 Block Words", callback_data=f"cnl:rblk:{sid}:{tid}"),
@@ -809,6 +812,43 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
 
             return await query.answer("Unknown action", show_alert=True)
 
+    # ── content type (movies / series / all) ──
+    if data.startswith("cnl:rct:"):
+        parts = data.split(":")
+        sid, tid = int(parts[2]), int(parts[3])
+        cnl = await get_cnl(user_id)
+        rule = await cnl.get_forward_rule(sid, tid, owner_id=user_id) if cnl else None
+        if not rule:
+            return await query.answer("Rule not found", show_alert=True)
+        from core.content_type import (
+            CONTENT_ALL, CONTENT_MOVIES, CONTENT_SERIES,
+            content_type_label, normalize_content_type,
+        )
+        if len(parts) >= 5:
+            mode = normalize_content_type(parts[4])
+            await cnl.set_content_type(sid, tid, mode, owner_id=user_id)
+            await query.answer(content_type_label(mode))
+            await _show_rule(client, query, user_id, sid, tid)
+            return await safe_answer(query)
+        cur = normalize_content_type(rule.get("content_type"))
+        def _m(mode, label):
+            return ("● " if cur == mode else "") + label
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(_m(CONTENT_ALL, "📦 All Content"), callback_data=f"cnl:rct:{sid}:{tid}:all")],
+            [InlineKeyboardButton(_m(CONTENT_MOVIES, "🎬 Movies Only"), callback_data=f"cnl:rct:{sid}:{tid}:movies")],
+            [InlineKeyboardButton(_m(CONTENT_SERIES, "📺 Series Only"), callback_data=f"cnl:rct:{sid}:{tid}:series")],
+            [InlineKeyboardButton("« Back", callback_data=_rule_back(sid, tid))],
+        ])
+        await safe_edit(
+            query,
+            f"**🎬 Content Type**\n\n"
+            f"Current: {content_type_label(cur)}\n\n"
+            "Movies Only / Series Only use title + filename (S01E01, Season, Episode).\n"
+            "Unknown titles are skipped when Movies or Series is selected.",
+            kb,
+        )
+        return await safe_answer(query)
+
     # ── media types ──
     # ── media types ──
     if data.startswith("cnl:rtype:"):
@@ -1255,6 +1295,7 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
                 "remove_old_caption": False, "replacements": [], "block_words": [],
                 "whitelist_words": [], "buttons": None, "forward_tag": False,
                 "remove_links": False, "allowed_types": ["all"], "delay": 0, "anti_dupe": False,
+                "content_type": "all",
             }, owner_id=user_id)
         await query.answer("Settings reset")
         await _show_rule(client, query, user_id, sid, tid)
@@ -1843,9 +1884,38 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
             await safe_answer(query, "Caption cleared", True)
             query.data = "cnl:gcopy:cap"
             return await cnl_callbacks(client, query)
+        elif action == "ct":
+            from core.content_type import (
+                CONTENT_ALL, CONTENT_MOVIES, CONTENT_SERIES,
+                content_type_label, normalize_content_type,
+            )
+            if len(parts) > 3:
+                mode = normalize_content_type(parts[3])
+                await cnl.update_global_copy_filters(user_id, {"content_type": mode})
+                await query.answer(content_type_label(mode))
+                gc = await cnl.get_global_copy(user_id) or {}
+            else:
+                cur = normalize_content_type(gc.get("content_type"))
+                def _m(mode, label):
+                    return ("● " if cur == mode else "") + label
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(_m(CONTENT_ALL, "📦 All Content"), callback_data="cnl:gcopy:ct:all")],
+                    [InlineKeyboardButton(_m(CONTENT_MOVIES, "🎬 Movies Only"), callback_data="cnl:gcopy:ct:movies")],
+                    [InlineKeyboardButton(_m(CONTENT_SERIES, "📺 Series Only"), callback_data="cnl:gcopy:ct:series")],
+                    [InlineKeyboardButton("« Back", callback_data="cnl:gcopy")],
+                ])
+                await safe_edit(
+                    query,
+                    f"**🎬 Global Copy — Content Type**\n\n"
+                    f"Current: {content_type_label(cur)}\n\n"
+                    "Unknown titles are skipped when Movies or Series is selected.",
+                    kb,
+                )
+                return await safe_answer(query)
 
 
 
+        from core.content_type import content_type_label
         en = gc.get("enabled", False)
         text = (
             f"**📋 Global Copy**\n\n"
@@ -1853,6 +1923,7 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
             f"Account: `{gc.get('my_account_id') or '— (required)'}`\n"
             f"Target: `{gc.get('target_chat_id') or '—'}`\n"
             f"Types: `{', '.join(gc.get('allowed_types') or ['all'])}`\n"
+            f"Content: {content_type_label(gc.get('content_type'))}\n"
             f"Delay: `{gc.get('delay') or 0}s`\n"
             f"Anti-dupe: {'ON' if gc.get('anti_dupe') else 'OFF'}\n"
             f"Forward tag: {'ON' if gc.get('forward_tag') else 'OFF'}\n"
@@ -1868,6 +1939,7 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
             [InlineKeyboardButton("👤 Select Account", callback_data="cnl:gcopy:acc")],
             [InlineKeyboardButton("🎯 Set target", callback_data="cnl:gcopy:target"),
              InlineKeyboardButton("📦 Types", callback_data="cnl:gcopy:types")],
+            [InlineKeyboardButton("🎬 Content Type", callback_data="cnl:gcopy:ct")],
             [InlineKeyboardButton("🚫 Block", callback_data="cnl:gcopy:block"),
              InlineKeyboardButton("✅ White", callback_data="cnl:gcopy:white")],
             [InlineKeyboardButton("🔄 Replacements", callback_data="cnl:gcopy:repl"),

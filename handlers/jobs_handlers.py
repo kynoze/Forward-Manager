@@ -72,10 +72,13 @@ logger = logging.getLogger(__name__)
 
 def _job_filters_text(job: dict) -> str:
     from core.op_filters import normalize_op_filters, ALL_MEDIA_TYPES
+    from core.content_type import content_type_label
     f = normalize_op_filters(job.get("filters"))
     types = f.get("media_types") or []
     lines = [
         "**Job Filters** (independent of target settings)",
+        "",
+        f"**Content:** {content_type_label(f.get('content_type'))}",
         "",
         "**Message types:**",
     ]
@@ -112,6 +115,15 @@ def _job_filters_kb(job: dict):
             row = []
     if row:
         rows.append(row)
+    from core.content_type import CONTENT_ALL, CONTENT_MOVIES, CONTENT_SERIES, normalize_content_type
+    cur_ct = normalize_content_type(f.get("content_type"))
+    def _ct_mark(mode, label):
+        return ("● " if cur_ct == mode else "") + label
+    rows.append([
+        InlineKeyboardButton(_ct_mark(CONTENT_ALL, "📦 All"), callback_data=f"job:ft:{job_id}:ct:all"),
+        InlineKeyboardButton(_ct_mark(CONTENT_MOVIES, "🎬 Movies"), callback_data=f"job:ft:{job_id}:ct:movies"),
+        InlineKeyboardButton(_ct_mark(CONTENT_SERIES, "📺 Series"), callback_data=f"job:ft:{job_id}:ct:series"),
+    ])
     be = "ON" if f.get("block_enabled") else "OFF"
     we = "ON" if f.get("whitelist_enabled") else "OFF"
     rows.append([
@@ -1440,6 +1452,9 @@ async def jobs_callbacks(client: Client, query: CallbackQuery):
             if not types:
                 types = ["video", "document"]
             f["media_types"] = types
+        elif action == "ct":
+            from core.content_type import normalize_content_type
+            f["content_type"] = normalize_content_type(parts[4] if len(parts) > 4 else "all")
         elif action == "btog":
             f["block_enabled"] = not bool(f.get("block_enabled"))
         elif action == "wtog":

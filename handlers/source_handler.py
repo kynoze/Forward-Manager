@@ -433,10 +433,13 @@ async def qf_controls(client: Client, query: CallbackQuery):
         return QF_FILTERS[user_id]
 
     def _qf_filters_text(f: dict) -> str:
+        from core.content_type import content_type_label
         types = f.get("media_types") or []
         lines = [
             "**Quick Forward Filters**",
             "_Independent of Jobs and Target settings_",
+            "",
+            f"**Content:** {content_type_label(f.get('content_type'))}",
             "",
             "**Message types:**",
         ]
@@ -468,6 +471,15 @@ async def qf_controls(client: Client, query: CallbackQuery):
                 row = []
         if row:
             rows.append(row)
+        from core.content_type import CONTENT_ALL, CONTENT_MOVIES, CONTENT_SERIES, normalize_content_type
+        cur_ct = normalize_content_type(f.get("content_type"))
+        def _ct_mark(mode, label):
+            return ("● " if cur_ct == mode else "") + label
+        rows.append([
+            InlineKeyboardButton(_ct_mark(CONTENT_ALL, "📦 All"), callback_data="qf:ft:ct:all"),
+            InlineKeyboardButton(_ct_mark(CONTENT_MOVIES, "🎬 Movies"), callback_data="qf:ft:ct:movies"),
+            InlineKeyboardButton(_ct_mark(CONTENT_SERIES, "📺 Series"), callback_data="qf:ft:ct:series"),
+        ])
         be = "ON" if f.get("block_enabled") else "OFF"
         we = "ON" if f.get("whitelist_enabled") else "OFF"
         rows.append([
@@ -611,10 +623,12 @@ async def qf_controls(client: Client, query: CallbackQuery):
         last = st.get("last_msg_id", 0)
         f = _ensure_qf_filters()
         types = ", ".join(f.get("media_types") or [])
+        from core.content_type import content_type_label
         text = (
             "**Quick Forward — ready**" + chr(10) + chr(10)
             + f"Skip: `{skip}` · Last: `{last}`" + chr(10)
             + f"Filters: `{types}`" + chr(10)
+            + f"Content: {content_type_label(f.get('content_type'))}" + chr(10)
             + f"Block: {'ON' if f.get('block_enabled') else 'OFF'} · "
             + f"White: {'ON' if f.get('whitelist_enabled') else 'OFF'}" + chr(10) + chr(10)
             + "Tap **Start** to begin."
@@ -636,6 +650,9 @@ async def qf_controls(client: Client, query: CallbackQuery):
             if not types:
                 types = ["video", "document"]
             f["media_types"] = types
+        elif sub == "ct":
+            from core.content_type import normalize_content_type
+            f["content_type"] = normalize_content_type(parts[3] if len(parts) > 3 else "all")
         elif sub == "btog":
             f["block_enabled"] = not bool(f.get("block_enabled"))
         elif sub == "wtog":
