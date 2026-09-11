@@ -135,7 +135,7 @@ async def _refresh_one_region(region: str, *, force: bool = False) -> None:
         return
 
     source = "tmdb:/trending/all/day"
-    logger.info(
+    logger.debug(
         "Trending update started region=global source=%s tmdb_keys=%s",
         source, len(pool),
     )
@@ -146,7 +146,7 @@ async def _refresh_one_region(region: str, *, force: bool = False) -> None:
         await tcache.save_region_cache(
             region, items, provider="tmdb", interval_sec=interval, source=source,
         )
-        logger.info(
+        logger.debug(
             "Trending cache updated region=global · %s titles · via=tmdb",
             len(items),
         )
@@ -205,7 +205,7 @@ async def _rebuild_wx_for_region(
                 provider="tmdb", parent_fetched_at=parent_at,
             )
             n_ok = sum(1 for x in tagged if x.get("available"))
-            logger.info(
+            logger.debug(
                 "Trending wx cache owner=%s wx=%s region=%s: %s/%s available",
                 owner_uid, wroxen_id, region, n_ok, len(tagged),
             )
@@ -284,14 +284,14 @@ async def _updater_loop() -> None:
             await asyncio.sleep(min(300, max(60, _interval() // 12)))
         except asyncio.CancelledError:
             break
-    logger.info("Trending updater stopped")
+    logger.debug("Trending updater stopped")
 
 
 async def start_trending_updater() -> None:
     global _task, _stop
     _stop = False
     if _task and not _task.done():
-        logger.info("Trending updater already running")
+        logger.debug("Trending updater already running")
         return
     await tcache.ensure_indexes()
     try:
@@ -301,7 +301,7 @@ async def start_trending_updater() -> None:
         pass
     await _purge_top_searches_once()
     _task = asyncio.create_task(_updater_loop(), name="wroxen_trending_updater")
-    logger.info(
+    logger.debug(
         "Trending updater scheduled (interval≈%ss, region=global TMDB only)",
         _interval(),
     )

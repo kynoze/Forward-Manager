@@ -155,7 +155,7 @@ async def fetch_popular_country(
         items = await _one(_TYPE_MAP[mt], limit)
         if not items:
             raise JustWatchError(f"empty popular {mt} list for {cc}")
-        logger.info("JustWatch %s · type=%s · %s titles", cc, mt, len(items))
+        logger.debug("JustWatch %s · type=%s · %s titles", cc, mt, len(items))
         return items[:limit]
 
     # all → fetch both, store movies then shows (UI filters later)
@@ -178,7 +178,7 @@ async def fetch_popular_country(
     if not out:
         msg = "; ".join(errors) if errors else "empty"
         raise JustWatchError(f"empty popular list for {cc}: {msg}")
-    logger.info(
+    logger.debug(
         "JustWatch %s · movies=%s shows=%s total=%s",
         cc, len(movies), len(shows), len(out),
     )

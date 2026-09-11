@@ -33,7 +33,7 @@ def _db():
 async def _drop_index_safe(col, name: str) -> None:
     try:
         await col.drop_index(name)
-        logger.info("Dropped legacy trending index %s on %s", name, col.name)
+        logger.debug("Dropped legacy trending index %s on %s", name, col.name)
     except Exception as e:
         # IndexNotFound is fine
         msg = str(e).lower()
@@ -95,7 +95,7 @@ async def ensure_indexes() -> None:
         except Exception as e:
             logger.warning("trend_wx_owner_region index: %s", e)
 
-        logger.info("Trending cache indexes ready (region-aware)")
+        logger.debug("Trending cache indexes ready (region-aware)")
     except Exception:
         logger.exception("trending cache ensure_indexes")
 

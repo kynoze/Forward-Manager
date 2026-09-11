@@ -93,7 +93,7 @@ async def purge_old_stats(*, older_than_days: Optional[int] = None) -> int:
         result = await d[COLL].delete_many({"day": {"$lt": cutoff}})
         n = int(getattr(result, "deleted_count", 0) or 0)
         if n:
-            logger.info(
+            logger.debug(
                 "Top Searches purge: deleted %s docs with day < %s (keep %sd)",
                 n, cutoff, days,
             )
@@ -135,7 +135,7 @@ async def record_successful_search(group_id: int, title: str) -> None:
             },
             upsert=True,
         )
-        logger.info(
+        logger.debug(
             "Top Searches +1 group=%s day=%s title=%s",
             group_id, day, display[:80],
         )
