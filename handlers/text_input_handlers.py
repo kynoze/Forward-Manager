@@ -104,6 +104,7 @@ async def handle_all_text_input(client: Client, message: Message):
                 "Minimum **5 minutes** for normal users. Owner/admin can use 1 or 2."
             )
         seconds = clamp_progress_ui_interval(raw_sec, allow_fast=_priv)
+        job_id = pui.get("job_id")
         from datetime import datetime, timezone
         bind = {}
         if pui.get("chat_id") and pui.get("message_id"):
@@ -555,7 +556,7 @@ async def handle_all_text_input(client: Client, message: Message):
     if jfs and isinstance(jfs, dict) and jfs.get("job_id"):
         word = (text or "").strip()
         if not word:
-            return await message.reply("Send a non-empty word.")
+            return await message.reply("Send a non-empty value.")
         from database import get_job, update_job
         from core.op_filters import normalize_op_filters
         job = await get_job(user_id, jfs["job_id"])
@@ -563,7 +564,21 @@ async def handle_all_text_input(client: Client, message: Message):
             set_state(client, "job_filter_state", user_id, None)
             return await message.reply("Job not found.")
         f = normalize_op_filters(job.get("filters"))
-        key = "block_words" if jfs.get("kind") == "block" else "whitelist_words"
+        kind = jfs.get("kind")
+        if kind == "size":
+            from core.media_size import parse_size_input, format_bytes
+            nbytes, err = parse_size_input(word)
+            if err or not nbytes:
+                return await message.reply(f"❌ {err or 'Invalid size.'}")
+            f["min_media_size"] = int(nbytes)
+            f["size_filter_enabled"] = True
+            await update_job(user_id, jfs["job_id"], {"filters": f})
+            set_state(client, "job_filter_state", user_id, None)
+            return await message.reply(
+                f"✅ Minimum media size set to **{format_bytes(nbytes)}**.\n"
+                "Size filter is **ON**. Open Job → Filters → 📏 Size to review."
+            )
+        key = "block_words" if kind == "block" else "whitelist_words"
         words = list(f.get(key) or [])
         if word not in words:
             words.append(word)

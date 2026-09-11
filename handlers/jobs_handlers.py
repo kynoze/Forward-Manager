@@ -94,7 +94,73 @@ def _job_filters_text(job: dict) -> str:
         "Whitelist: **%s** · `%s` words"
         % ("ON" if f.get("whitelist_enabled") else "OFF", len(f.get("whitelist_words") or []))
     )
+    from core.media_size import format_bytes
+    sz_on = bool(f.get("size_filter_enabled"))
+    min_b = int(f.get("min_media_size") or 0)
+    if sz_on:
+        lines.append(
+            "📏 Media Size Filter: **ON** · Min `%s`" % format_bytes(min_b)
+        )
+    else:
+        lines.append(
+            "📏 Media Size Filter: **OFF**"
+            + ((" · saved `%s`" % format_bytes(min_b)) if min_b else "")
+        )
     return chr(10).join(lines)
+
+
+
+def _job_size_filter_text(job: dict) -> str:
+    from core.op_filters import normalize_op_filters
+    from core.media_size import format_bytes
+    f = normalize_op_filters(job.get("filters"))
+    on = bool(f.get("size_filter_enabled"))
+    min_b = int(f.get("min_media_size") or 0)
+    lines = [
+        "**📏 Media Size Filter**",
+        "",
+        f"Status: **{'ON' if on else 'OFF'}**",
+        f"Minimum Size: **{format_bytes(min_b) if min_b else 'Not Set'}**",
+        "",
+        "Files smaller than the minimum are skipped (not forwarded).",
+        "Exact size match is allowed.",
+        "",
+        "OFF keeps the saved minimum for later.",
+    ]
+    return chr(10).join(lines)
+
+
+def _job_size_filter_kb(job: dict):
+    from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from core.op_filters import normalize_op_filters
+    from core.media_size import SIZE_PRESETS, format_bytes
+    job_id = job["job_id"]
+    f = normalize_op_filters(job.get("filters"))
+    on = bool(f.get("size_filter_enabled"))
+    min_b = int(f.get("min_media_size") or 0)
+    rows = [
+        [InlineKeyboardButton(
+            ("🟢 ON" if on else "⚪ OFF") + "  (tap to toggle)",
+            callback_data=f"job:ft:{job_id}:sztog",
+        )],
+    ]
+    row = []
+    for label, nbytes in SIZE_PRESETS:
+        mark = "● " if min_b == nbytes else ""
+        row.append(InlineKeyboardButton(
+            f"{mark}{label}", callback_data=f"job:ft:{job_id}:szset:{nbytes}"
+        ))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("✏️ Custom Size", callback_data=f"job:ft:{job_id}:szcustom"),
+        InlineKeyboardButton("🗑️ Clear Min", callback_data=f"job:ft:{job_id}:szclr"),
+    ])
+    rows.append([InlineKeyboardButton("« Filters", callback_data=f"job:filters:{job_id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _job_filters_kb(job: dict):
@@ -141,6 +207,15 @@ def _job_filters_kb(job: dict):
     rows.append([
         InlineKeyboardButton("Clear block", callback_data=f"job:ft:{job_id}:bclr"),
         InlineKeyboardButton("Clear white", callback_data=f"job:ft:{job_id}:wclr"),
+    ])
+    from core.media_size import format_bytes
+    sz_on = bool(f.get("size_filter_enabled"))
+    min_b = int(f.get("min_media_size") or 0)
+    sz_label = "📏 Size ON" if sz_on else "📏 Size OFF"
+    if min_b:
+        sz_label += f" · {format_bytes(min_b)}"
+    rows.append([
+        InlineKeyboardButton(sz_label, callback_data=f"job:ft:{job_id}:size"),
     ])
     rows.append([InlineKeyboardButton("« Job", callback_data=f"job:open:{job_id}")])
     return InlineKeyboardMarkup(rows)
@@ -235,6 +310,7 @@ def job_controls_keyboard(job: dict) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("📋 Logs", callback_data=f"job:logs:{job_id}"),
             InlineKeyboardButton("🔍 Filters", callback_data=f"job:filters:{job_id}"),
+            InlineKeyboardButton("🎟️ Sticker", callback_data=f"job:cs:{job_id}"),
         ]
     )
     if status == "running":
@@ -428,6 +504,8 @@ def job_detail_text(job: dict) -> str:
         f"{target_line}\n"
         f"⚙️ **Method:** `{job.get('method')}` · {actor}\n"
         f"**Status:** {icon} `{status}`\n"
+        f"🎟️ Sticker: `{'ON' if job.get('completion_sticker_enabled') else 'OFF'}`"
+        f" · `{len(job.get('completion_stickers') or [])}`\n"
         f"🔄 Updated: `{updated_s}`\n"
         f"{pause_block}"
         f"{pre_line}"
@@ -1421,6 +1499,9 @@ async def jobs_callbacks(client: Client, query: CallbackQuery):
         return await safe_answer(query)
 
 
+    if data.startswith("job:cs:"):
+        return await _completion_sticker_callbacks(client, query, user_id, data)
+
     if data.startswith("job:filters:"):
         job_id = data.split(":")[2]
         job = await get_job_scoped(user_id, job_id)
@@ -1479,9 +1560,41 @@ async def jobs_callbacks(client: Client, query: CallbackQuery):
             })
             await safe_edit(query, "Send the word/phrase to add. /cancel to abort.")
             return await safe_answer(query)
+        elif action == "size":
+            await safe_edit(query, _job_size_filter_text(job), _job_size_filter_kb(job))
+            return await safe_answer(query)
+        elif action == "sztog":
+            f["size_filter_enabled"] = not bool(f.get("size_filter_enabled"))
+        elif action == "szset":
+            try:
+                nbytes = int(parts[4]) if len(parts) > 4 else 0
+            except ValueError:
+                nbytes = 0
+            if nbytes > 0:
+                f["min_media_size"] = nbytes
+                f["size_filter_enabled"] = True
+        elif action == "szclr":
+            f["min_media_size"] = 0
+            # keep enabled flag as-is (OFF path still remembers clear)
+        elif action == "szcustom":
+            set_state(client, "job_filter_state", user_id, {
+                "job_id": job_id,
+                "kind": "size",
+            })
+            await safe_edit(
+                query,
+                "Send minimum media size.\n\n"
+                "Examples:\n`100 MB`\n`250 MB`\n`1.5 GB`\n`2 GB`\n\n"
+                "/cancel to abort.",
+            )
+            return await safe_answer(query)
         await update_job(user_id, job_id, {"filters": f})
         job = await get_job_scoped(user_id, job_id) or job
-        await safe_edit(query, _job_filters_text(job), _job_filters_kb(job))
+        # Stay on size panel when editing size fields
+        if action in ("sztog", "szset", "szclr"):
+            await safe_edit(query, _job_size_filter_text(job), _job_size_filter_kb(job))
+        else:
+            await safe_edit(query, _job_filters_text(job), _job_filters_kb(job))
         return await safe_answer(query)
 
     if data.startswith("job:logs:"):
@@ -2284,3 +2397,185 @@ async def jobs_log_callbacks(client: Client, query: CallbackQuery):
         return
 
     return await safe_answer(query)
+
+
+# ── Completion sticker UI ──────────────────────────────────────────────────
+
+
+def _cs_text(job: dict) -> str:
+    on = bool(job.get("completion_sticker_enabled"))
+    n = len(job.get("completion_stickers") or [])
+    return (
+        "**🎟️ Completion Sticker**\n\n"
+        f"Status: **{'ON' if on else 'OFF'}**\n"
+        f"Stickers: **{n}**\n\n"
+        "When a Movie / Series group is fully forwarded, "
+        "**one** random configured sticker is sent to that target.\n\n"
+        "Quality variants of the same title count as **one** group.\n"
+        "Turning OFF keeps saved stickers."
+    )
+
+
+def _cs_kb(job: dict) -> InlineKeyboardMarkup:
+    job_id = job["job_id"]
+    on = bool(job.get("completion_sticker_enabled"))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"🎟️ Completion Sticker: {'ON' if on else 'OFF'}",
+            callback_data=f"job:cs:{job_id}:tog",
+        )],
+        [
+            InlineKeyboardButton("➕ Add Sticker", callback_data=f"job:cs:{job_id}:add"),
+            InlineKeyboardButton("🗂️ Manage", callback_data=f"job:cs:{job_id}:mgr"),
+        ],
+        [InlineKeyboardButton("🗑️ Clear All", callback_data=f"job:cs:{job_id}:clr")],
+        [InlineKeyboardButton("« Job", callback_data=f"job:open:{job_id}")],
+    ])
+
+
+def _cs_manage_kb(job: dict) -> InlineKeyboardMarkup:
+    job_id = job["job_id"]
+    stickers = job.get("completion_stickers") or []
+    rows = []
+    for i, _fid in enumerate(stickers):
+        rows.append([
+            InlineKeyboardButton(
+                f"{i + 1}. Sticker",
+                callback_data=f"job:cs:{job_id}:noop",
+            ),
+            InlineKeyboardButton(
+                "🗑️ Remove",
+                callback_data=f"job:cs:{job_id}:rm:{i}",
+            ),
+        ])
+    if not rows:
+        rows.append([InlineKeyboardButton("No stickers", callback_data=f"job:cs:{job_id}:noop")])
+    rows.append([InlineKeyboardButton("« Back", callback_data=f"job:cs:{job_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _completion_sticker_callbacks(client, query, user_id: int, data: str):
+    parts = data.split(":")
+    job_id = parts[2] if len(parts) > 2 else ""
+    action = parts[3] if len(parts) > 3 else ""
+    job = await get_job_scoped(user_id, job_id)
+    if not job:
+        return await safe_answer(query, "Job not found", True)
+    owner_id = int(job.get("user_id") or user_id)
+
+    if action == "noop":
+        return await safe_answer(query)
+
+    if action == "tog":
+        cur = bool(job.get("completion_sticker_enabled"))
+        await update_job(owner_id, job_id, {"completion_sticker_enabled": not cur})
+        job = await get_job_scoped(user_id, job_id) or job
+        await safe_edit(query, _cs_text(job), _cs_kb(job))
+        return await safe_answer(query, "ON" if not cur else "OFF")
+
+    if action == "add":
+        set_state(client, "job_sticker_state", user_id, {"job_id": job_id})
+        await safe_edit(
+            query,
+            "**➕ Add Completion Sticker**\n\n"
+            "Send or **forward** the Telegram sticker you want to use.\n\n"
+            "You can add multiple stickers.\n"
+            "Only **ONE** random sticker is sent when a Movie/Series group completes.\n\n"
+            "/cancel to abort.",
+        )
+        return await safe_answer(query)
+
+    if action == "mgr":
+        stickers = job.get("completion_stickers") or []
+        await safe_edit(
+            query,
+            f"**🎟️ Completion Stickers**\n\nSaved: **{len(stickers)}**\n"
+            "Tap Remove to delete one. Stickers stay if you turn the feature OFF.",
+            _cs_manage_kb(job),
+        )
+        return await safe_answer(query)
+
+    if action == "rm":
+        try:
+            idx = int(parts[4])
+        except (IndexError, ValueError):
+            return await safe_answer(query, "Invalid", True)
+        stickers = list(job.get("completion_stickers") or [])
+        if 0 <= idx < len(stickers):
+            stickers.pop(idx)
+            await update_job(owner_id, job_id, {"completion_stickers": stickers})
+            await safe_answer(query, "Removed")
+        else:
+            await safe_answer(query, "Not found", True)
+        job = await get_job_scoped(user_id, job_id) or job
+        stickers = job.get("completion_stickers") or []
+        await safe_edit(
+            query,
+            f"**🎟️ Completion Stickers**\n\nSaved: **{len(stickers)}**",
+            _cs_manage_kb(job),
+        )
+        return
+
+    if action == "clr":
+        await update_job(owner_id, job_id, {"completion_stickers": []})
+        job = await get_job_scoped(user_id, job_id) or job
+        await safe_edit(query, _cs_text(job), _cs_kb(job))
+        return await safe_answer(query, "Cleared")
+
+    await safe_edit(query, _cs_text(job), _cs_kb(job))
+    return await safe_answer(query)
+
+
+@Client.on_message(filters.private & filters.incoming & filters.sticker)
+async def job_completion_sticker_input(client: Client, message):
+    user_id = message.from_user.id
+    from core.access import can_access_bot
+    if not await can_access_bot(user_id):
+        return
+    st = get_state(client, "job_sticker_state", user_id) or {}
+    job_id = st.get("job_id") if isinstance(st, dict) else None
+    if not job_id:
+        return
+    set_state(client, "job_sticker_state", user_id, None)
+    job = await get_job_scoped(user_id, job_id)
+    if not job:
+        await message.reply("Job not found. Sticker not saved.")
+        return
+    sticker = message.sticker
+    file_id = getattr(sticker, "file_id", None) if sticker else None
+    if not file_id:
+        await message.reply("That is not a valid Telegram sticker. Send a sticker.")
+        return
+    owner_id = int(job.get("user_id") or user_id)
+    stickers = list(job.get("completion_stickers") or [])
+    if file_id in stickers:
+        await message.reply("This sticker is already saved for this job.")
+    else:
+        stickers.append(str(file_id))
+        await update_job(owner_id, job_id, {"completion_stickers": stickers})
+        await message.reply("✅ Sticker added successfully.")
+    job = await get_job_scoped(user_id, job_id) or job
+    await message.reply(_cs_text(job), reply_markup=_cs_kb(job))
+
+
+@Client.on_message(filters.private & filters.incoming & ~filters.sticker, group=8)
+async def job_sticker_wrong_media(client: Client, message):
+    user_id = getattr(message.from_user, "id", None)
+    if not user_id:
+        return
+    st = get_state(client, "job_sticker_state", user_id)
+    if not (isinstance(st, dict) and st.get("job_id")):
+        return
+    txt = (message.text or "").strip()
+    if txt.lower() in ("/cancel", "cancel"):
+        set_state(client, "job_sticker_state", user_id, None)
+        job = await get_job_scoped(user_id, st["job_id"])
+        if job:
+            await message.reply("Cancelled.", reply_markup=_cs_kb(job))
+        else:
+            await message.reply("Cancelled.")
+        return
+    await message.reply(
+        "Please send or forward a **Telegram sticker** (not photo/text).\n"
+        "/cancel to abort."
+    )
