@@ -108,7 +108,7 @@ async def main():
         try:
             from core.wroxen.trending.service import start_trending_updater
             await start_trending_updater()
-            logger.info("Wroxen Trending updater scheduled")
+            logger.debug("Wroxen Trending updater scheduled")
         except Exception:
             logger.exception("Wroxen Trending updater start skipped")
     except Exception:

@@ -1229,6 +1229,10 @@ async def create_job(
             "whitelist_words": [],
             "content_type": "all",
         },
+        "completion_sticker_enabled": False,
+        "completion_stickers": [],
+        "completion_groups": {},
+        "completion_active": {},
         "created_at": now,
         "updated_at": now
     }
