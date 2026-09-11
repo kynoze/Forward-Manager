@@ -223,6 +223,17 @@ async def owner_callbacks(client: Client, query: CallbackQuery):
             except Exception:
                 counts[n] = -1
         lines = [f"**📊 Bot Stats**\n", f"Users: `{users}`"]
+        try:
+            from config import Config
+            st = await db.client[Config.DB_NAME].command("dbStats")
+            used_mb = float(st.get("storageSize") or 0) / (1024.0 * 1024.0)
+            limit_mb = float(getattr(Config, "ATLAS_STORAGE_LIMIT_MB", 512) or 512)
+            pct = (used_mb / limit_mb * 100.0) if limit_mb else 0.0
+            lines.append(
+                f"Main DB storage: `{used_mb:.2f} MB` / `{limit_mb:.0f} MB` (`{pct:.1f}%`)"
+            )
+        except Exception:
+            pass
         for n, c in sorted(counts.items()):
             lines.append(f"`{n}`: {c}")
         await safe_edit(query, "\n".join(lines)[:3500], InlineKeyboardMarkup([
@@ -234,24 +245,61 @@ async def owner_callbacks(client: Client, query: CallbackQuery):
         from database import db
         from core.db_resolver import mask_uri
         from config import Config
-        lines = ["**🗄️ Bot Databases — Main**\n"]
+
+        def _mb(n) -> float:
+            try:
+                return float(n or 0) / (1024.0 * 1024.0)
+            except Exception:
+                return 0.0
+
+        def _fmt_mb(n) -> str:
+            return f"{_mb(n):.2f} MB"
+
+        limit_mb = float(getattr(Config, "ATLAS_STORAGE_LIMIT_MB", 512) or 512)
+        lines = ["**🗄️ Bot Storage — Main DB**", ""]
         try:
             st = await db.client[Config.DB_NAME].command("dbStats")
             names = await db.db.list_collection_names()
-            lines.append(f"DB: `{Config.DB_NAME}`")
-            lines.append(f"URI: `{mask_uri(Config.MONGO_URI)}`")
-            lines.append(f"Storage: `{st.get('storageSize', '—')}` bytes")
-            lines.append(f"Data: `{st.get('dataSize', '—')}` · Index: `{st.get('indexSize', '—')}`")
-            lines.append(f"Collections: `{len(names)}` · Docs: `{st.get('objects', '—')}`\n")
+            storage_b = float(st.get("storageSize") or 0)
+            data_b = float(st.get("dataSize") or 0)
+            index_b = float(st.get("indexSize") or 0)
+            used_mb = _mb(storage_b)
+            pct = (used_mb / limit_mb * 100.0) if limit_mb > 0 else 0.0
+            if pct >= 90:
+                bar = "🔴"
+            elif pct >= 70:
+                bar = "🟡"
+            else:
+                bar = "🟢"
+            lines.append(f"**Main DB:** `{Config.DB_NAME}`")
+            lines.append(f"**URI:** `{mask_uri(Config.MONGO_URI)}`")
+            lines.append("")
+            lines.append(
+                f"**Storage:** `{used_mb:.2f} MB` / `{limit_mb:.0f} MB`  {bar} `{pct:.1f}%`"
+            )
+            lines.append(
+                f"Data: `{_fmt_mb(data_b)}` · Index: `{_fmt_mb(index_b)}`"
+            )
+            lines.append(
+                f"Collections: `{len(names)}` · Objects: `{st.get('objects', '—')}`"
+            )
+            lines.append("")
+            lines.append("_Limit default 512 MB (Atlas M0). Override: `ATLAS_STORAGE_LIMIT_MB`._")
+            lines.append("")
         except Exception:
-            lines.append("⚠️ Storage information unavailable\n")
-        for n in sorted(await db.db.list_collection_names()):
-            try:
-                c = await db.db[n].estimated_document_count()
-            except Exception:
-                c = "?"
-            lines.append(f"`{n}`: {c}")
+            lines.append("⚠️ Storage information unavailable")
+            lines.append("")
+        try:
+            for n in sorted(await db.db.list_collection_names()):
+                try:
+                    c = await db.db[n].estimated_document_count()
+                except Exception:
+                    c = "?"
+                lines.append(f"`{n}`: {c}")
+        except Exception:
+            pass
         await safe_edit(query, "\n".join(lines)[:3500], InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="own:storage")],
             [InlineKeyboardButton("👤 User DBs", callback_data="own:dbs")],
             [InlineKeyboardButton("« Owner", callback_data="own:home")],
         ]))
