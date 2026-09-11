@@ -41,8 +41,23 @@ def _apply_replacements_cnl_style(text, replacements: list):
     return result
 
 
-def _extract_source_text(message) -> str:
-    """Prefer HTML so bold/links/entities survive when Kurigram provides .html."""
+def _extract_source_text(message, *, plain: bool = False) -> str:
+    """Extract caption/text from a message.
+
+    plain=True  → same as CNL: message.caption or message.text (no HTML).
+                  Required when remove_links / replacements run, otherwise
+                  Kurigram .html (e.g. <a href="https://t.me/x">@x</a>) breaks
+                  username/link stripping and leaves junk tags.
+    plain=False → prefer HTML when available (rich formatting path).
+    """
+    if plain:
+        for attr in ("caption", "text"):
+            val = getattr(message, attr, None)
+            if val is None:
+                continue
+            return str(val)
+        return ""
+
     for attr in ("text", "caption"):
         val = getattr(message, attr, None)
         if val is None:
@@ -59,7 +74,14 @@ def _extract_source_text(message) -> str:
 
 
 def process_caption(message, settings: Dict[str, Any]) -> Optional[str]:
-    original = _extract_source_text(message)
+    # Any text-mutating step must start from plain caption — identical to CNL
+    # process_original_text / clean_file_name path.
+    needs_plain = bool(
+        settings.get("remove_links")
+        or settings.get("replace_enabled")
+        or settings.get("caption_enabled")
+    )
+    original = _extract_source_text(message, plain=needs_plain)
     return apply_caption_text(original, settings)
 
 

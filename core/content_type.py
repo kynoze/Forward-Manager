@@ -42,19 +42,96 @@ _SERIES_RES = [
     re.compile(r"(?i)\b(?:E|EP|Episode)\s*(\d{1,3})(?:\s*(?:-|to|–)\s*(\d{1,3}))?\b"),
     re.compile(r"(?i)\bS(\d{1,2})\b"),
     re.compile(r"(?i)\b(\d{1,2})x(\d{1,3})\b"),
+    re.compile(r"(?i)\bEp(?:isode)?\s*(\d{1,3})\s*[-–]\s*(\d{1,3})\b"),
 ]
 
 _YEAR_RE = re.compile(r"(?:^|[^\d])((?:19|20)\d{2})(?:[^\d]|$)")
 _QUALITY_RE = re.compile(
-    r"(?i)\b(2160p|1440p|1080p|720p|480p|360p|4k|8k|bluray|blu-ray|bluray|"
+    r"(?i)\b(2160p|1440p|1080p|720p|480p|360p|4k|8k|bluray|blu-ray|"
     r"web[- ]?dl|webrip|hdrip|remux|hdtv|dvdrip|x264|x265|hevc|avc)\b"
 )
 _VIDEO_EXT_RE = re.compile(r"(?i)\.(mkv|mp4|avi|mov|m4v|ts|m2ts|wmv)$")
+
+# Release junk stripped from titles when building logical group keys.
+_STRIP_TOKENS = {
+    # quality / resolution
+    "480p", "720p", "1080p", "1440p", "2160p", "360p", "4k", "8k",
+    # codecs
+    "hevc", "x264", "x265", "h264", "h265", "avc", "10bit", "8bit",
+    "h", "265", "264",  # "H 265" / "H 264" after split
+    # sources / platforms
+    "webdl", "web-dl", "webrip", "bluray", "blu-ray", "hdrip", "hdtv",
+    "bdrip", "dvdrip", "remux", "web", "dl",
+    "amzn", "nf", "dsnp", "atvp", "hmax", "zee5", "hotstar", "prime",
+    "netflix", "ds4k", "hdtv",
+    # audio
+    "aac", "ddp", "dd+", "atmos", "ddp5", "dd5", "dts", "truehd",
+    "6ch", "2ch", "5ch", "7ch",
+    # languages
+    "hindi", "english", "tamil", "telugu", "malayalam", "kannada",
+    "dual", "audio", "multi",
+    # subs / container
+    "esub", "esubs", "sub", "subs", "subtitle", "subtitles",
+    "mkv", "mp4", "avi", "org", "orgn",
+    # pack / episode markers that must not split series groups
+    "combined", "complete", "series", "season", "episode", "ep",
+    # common release-group / uploader tags (scene + Indian packs)
+    "anup", "ospreay", "archie", "psa", "sampa", "aarav", "efx",
+    "godfather", "rarbg", "yts", "yify", "evo", "sparks", "cmrg",
+    "tigris", "pahe", "tgx",
+    "ex", "uncut", "extended", "proper", "repack", "internal", "hdtc", "hdts", "cam", "telesync",
+}
+
+_TITLE_JUNK_RE = re.compile(
+    r"(?i)\b("
+    r"2160p|1440p|1080p|720p|480p|360p|4k|8k|"
+    r"hevc|x264|x265|h\.?\s?264|h\.?\s?265|avc|10bit|8bit|"
+    r"web[- ]?dl|webrip|bluray|blu-ray|hdrip|hdtv|bdrip|dvdrip|remux|"
+    r"amzn|dsnp|atvp|hmax|zee5|hotstar|netflix|ds4k|\bnf\b|"
+    r"aac|ddp?|atmos|truehd|dts|"
+    r"6ch|2ch|5ch|7ch|"
+    r"hindi|english|tamil|telugu|malayalam|kannada|"
+    r"dual[\s-]?audio|multi[\s-]?audio|"
+    r"esubs?|subs?|subtitles?|"
+    r"combined|complete|"
+    r"mkv|mp4|avi"
+    r")\b"
+)
+
+# Cut title at first strong release marker (quality / source).
+_CUT_AT_RELEASE_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:2160p|1440p|1080p|720p|480p|360p|4k|8k)\b|"
+    r"\b(?:web[- ]?dl|webrip|bluray|blu-ray|hdrip|hdtv|bdrip|dvdrip|remux)\b|"
+    r"\b(?:x264|x265|h\.?\s?264|h\.?\s?265|hevc|avc)\b"
+    r")"
+)
+
+# Episode range / season tokens inside title text
+_EP_RANGE_RE = re.compile(
+    r"(?i)\b(?:s\d{1,2}\s*)?(?:e(?:p)?\s*\d{1,3}\s*[-–]\s*e?(?:p)?\s*\d{1,3})\b"
+)
+_SEASON_TOKEN_RE = re.compile(r"(?i)\bS\d{1,2}\b|\bseason\s*\d{1,2}\b")
+
+# Audio channel layouts must not become part of the logical title
+# (e.g. "AAC 5.1" → "5 1" would otherwise split the same movie into 2 groups).
+_AUDIO_CHANNEL_RE = re.compile(
+    r"(?i)\b(?:dd[p+]?|dts|truehd|atmos|aac)?[\s._-]*"
+    r"(?:5[\s._-]*1|7[\s._-]*1|2[\s._-]*0|6[\s._-]*1)\b"
+)
+
+
+def _strip_audio_channels(text: str) -> str:
+    s = _AUDIO_CHANNEL_RE.sub(" ", text or "")
+    # Bare "5 1" / "7 1" left after codec strip or after dots→spaces
+    s = re.sub(r"(?i)\b([257])\s+([01])\b", " ", s)
+    return s
 
 
 def _normalize_for_match(text: str) -> str:
     """Dots/underscores → spaces so Season.2 / Name.2024.BluRay match word patterns."""
     s = re.sub(r"[._]+", " ", text)
+    s = _strip_audio_channels(s)
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
@@ -112,7 +189,6 @@ def _looks_like_movie(text: str, ptt: Optional[dict] = None) -> bool:
         or bool(ptt.get("quality") or ptt.get("source") or ptt.get("codec"))
     )
     has_ext = bool(_VIDEO_EXT_RE.search(text.strip()))
-    # Enough letter tokens to look like a real title (not just "2024 BluRay")
     word_tokens = [w for w in re.findall(r"[A-Za-z]{2,}", norm) if w.lower() not in {
         "bluray", "webrip", "webdl", "hdrip", "remux", "hdtv", "dvdrip",
         "x264", "x265", "hevc", "avc", "mkv", "mp4", "dual", "audio",
@@ -131,29 +207,95 @@ def _looks_like_movie(text: str, ptt: Optional[dict] = None) -> bool:
     return False
 
 
-def detect_from_text(text: Optional[str]) -> str:
-    """Classify a caption / filename string. Never maps unknown → movie.
+def _title_core_before_release(text: str) -> str:
+    """Keep only the name part before quality/source markers."""
+    s = text or ""
+    # Prefer text before first (YEAR) or before quality when year uses dots: Title 2026.1080p
+    m_year_dot = re.search(r"(?i)\b((?:19|20)\d{2})\s*[.\-]\s*(?:\d{3,4}p|web|blu)", s)
+    if m_year_dot:
+        s = s[: m_year_dot.start()] + " " + m_year_dot.group(1)
+    m_cut = _CUT_AT_RELEASE_RE.search(s)
+    if m_cut:
+        s = s[: m_cut.start()]
+    return s
 
-    Strategy (same idea as reference clone.py + parsett 1.8.5):
-    1. ``parse_title`` → seasons/episodes ⇒ series
-    2. regex fallback for SxxExx / Season / Episode if PTT missed them
-    3. ``parse_title`` title + year/quality ⇒ movie (not merely “no season”)
-    """
+
+def _fallback_title(text: str) -> str:
+    """Strip release junk from raw text when PTT has no title."""
+    s = _title_core_before_release(text)
+    s = _normalize_for_match(s)
+    s = _TITLE_JUNK_RE.sub(" ", s)
+    s = _strip_audio_channels(s)
+    s = _EP_RANGE_RE.sub(" ", s)
+    s = _SEASON_TOKEN_RE.sub(" ", s)
+    s = re.sub(r"(?i)\bS\d{1,2}(?:\s*E(?:P)?\d{1,3}(?:\s*[-–]\s*E?(?:P)?\d{1,3})?)?\b", " ", s)
+    s = re.sub(r"(?i)\b(?:season|episode|ep)\s*\d+\b", " ", s)
+    s = re.sub(r"\((?:19|20)\d{2}\)", " ", s)
+    s = re.sub(r"\b(?:19|20)\d{2}\b", " ", s)  # bare year in title → year field owns it
+    s = re.sub(r"[\[\](){}~#🔊]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip(" -_|+")
+    return s
+
+
+def parse_metadata(text: Optional[str]) -> dict:
+    """PTT-first parse. Always returns type/title/year/seasons/episodes."""
+    empty = {
+        "type": "unknown",
+        "title": "",
+        "year": None,
+        "seasons": [],
+        "episodes": [],
+    }
     if not text or not str(text).strip():
-        return "unknown"
+        return dict(empty)
     raw = str(text).strip()
-    # PTT on raw first (parsett handles dotted scene names well at 1.8.5)
     ptt = _ptt_parse(raw)
     if not (ptt.get("title") or ptt.get("seasons") or ptt.get("episodes")):
         ptt2 = _ptt_parse(_normalize_for_match(raw))
         if ptt2:
             ptt = ptt2
-    # Reference logic: is_series = bool(seasons or episodes)
+
+    seasons = list(ptt.get("seasons") or []) if isinstance(ptt.get("seasons"), list) else []
+    episodes = list(ptt.get("episodes") or []) if isinstance(ptt.get("episodes"), list) else []
+    title = (ptt.get("title") or "").strip() if isinstance(ptt.get("title"), str) else ""
+    year = ptt.get("year")
+    if year is not None:
+        try:
+            year = int(year)
+        except (TypeError, ValueError):
+            year = None
+    if year is None:
+        m = _YEAR_RE.search(_normalize_for_match(raw))
+        if m:
+            year = int(m.group(1))
+
     if _looks_like_series(raw, ptt):
-        return "series"
-    if _looks_like_movie(raw, ptt):
-        return "movie"
-    return "unknown"
+        kind = "series"
+    elif _looks_like_movie(raw, ptt):
+        kind = "movie"
+    else:
+        kind = "unknown"
+
+    if not title:
+        title = _fallback_title(raw)
+    else:
+        # PTT titles sometimes keep group tags — run the same cleaner
+        cleaned = _fallback_title(title)
+        if cleaned and len(cleaned) >= 2:
+            title = cleaned
+
+    return {
+        "type": kind,
+        "title": title,
+        "year": year,
+        "seasons": seasons,
+        "episodes": episodes,
+    }
+
+
+def detect_from_text(text: Optional[str]) -> str:
+    """Classify a caption / filename string. Never maps unknown → movie."""
+    return parse_metadata(text).get("type") or "unknown"
 
 
 def collect_title_sources(message: Any) -> list[str]:
@@ -174,17 +316,29 @@ def collect_title_sources(message: Any) -> list[str]:
     return out
 
 
+def parse_message_metadata(message: Any) -> dict:
+    """Best metadata across caption + filenames. Series wins over movie."""
+    best = {
+        "type": "unknown",
+        "title": "",
+        "year": None,
+        "seasons": [],
+        "episodes": [],
+    }
+    for src in collect_title_sources(message):
+        meta = parse_metadata(src)
+        if meta["type"] == "series":
+            return meta
+        if meta["type"] == "movie" and best["type"] != "movie":
+            best = meta
+        elif not best.get("title") and meta.get("title"):
+            best = meta
+    return best
+
+
 def detect_content_type(message: Any) -> str:
     """Classify one Telegram message. Prefer series if any source is series."""
-    sources = collect_title_sources(message)
-    if not sources:
-        return "unknown"
-    kinds = [detect_from_text(s) for s in sources]
-    if "series" in kinds:
-        return "series"
-    if "movie" in kinds:
-        return "movie"
-    return "unknown"
+    return parse_message_metadata(message).get("type") or "unknown"
 
 
 def detect_content_type_from_messages(messages: Iterable[Any]) -> str:
@@ -199,6 +353,49 @@ def detect_content_type_from_messages(messages: Iterable[Any]) -> str:
     if "movie" in kinds:
         return "movie"
     return "unknown"
+
+
+def normalize_group_title(title: str) -> str:
+    """Lowercase title, drop release junk, keep distinguishing tokens (Dhamaal 4)."""
+    s = _title_core_before_release(title or "")
+    s = _normalize_for_match(s)
+    s = _TITLE_JUNK_RE.sub(" ", s)
+    s = _strip_audio_channels(s)
+    s = _EP_RANGE_RE.sub(" ", s)
+    s = _SEASON_TOKEN_RE.sub(" ", s)
+    s = re.sub(r"\b(?:19|20)\d{2}\b", " ", s)
+    s = re.sub(r"[^\w\s]", " ", s, flags=re.UNICODE)
+    parts = []
+    for tok in s.lower().split():
+        if tok in _STRIP_TOKENS:
+            continue
+        # skip pure noise tokens like "+" leftovers
+        if tok in {"+", "-", "_"}:
+            continue
+        parts.append(tok)
+    return "_".join(parts).strip("_")
+
+
+def group_key_from_metadata(meta: dict) -> Optional[str]:
+    """Deterministic logical group id. None for unknown / untitled."""
+    kind = (meta or {}).get("type") or "unknown"
+    if kind not in ("movie", "series"):
+        return None
+    title = normalize_group_title(meta.get("title") or "")
+    if not title:
+        return None
+    year = meta.get("year")
+    year_s = str(int(year)) if year else ""
+    if kind == "movie":
+        return f"movie:{title}:{year_s}" if year_s else f"movie:{title}"
+    if year_s:
+        return f"series:{title}:{year_s}"
+    return f"series:{title}"
+
+
+def get_content_group_key(message: Any) -> Optional[str]:
+    """Logical movie/series group for completion stickers (quality ignored)."""
+    return group_key_from_metadata(parse_message_metadata(message))
 
 
 def content_type_allows(kind: str, setting: Any) -> bool:

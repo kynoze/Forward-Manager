@@ -48,6 +48,12 @@ def should_process_message(message: Message, settings: Dict[str, Any]) -> tuple[
         if not any(w.lower() in text_lower for w in whitelist if w):
             return False, "whitelist_miss"
 
+    # Minimum media size (Jobs op_filters → settings via merge_settings_for_forward)
+    from core.media_size import passes_size_filter
+    ok_sz, reason_sz = passes_size_filter(message, settings)
+    if not ok_sz:
+        return False, reason_sz
+
     return True, "ok"
 
 

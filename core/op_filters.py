@@ -29,6 +29,8 @@ def default_op_filters() -> Dict[str, Any]:
         "whitelist_enabled": False,
         "whitelist_words": [],
         "content_type": "all",
+        "size_filter_enabled": False,
+        "min_media_size": 0,
     }
 
 
@@ -54,6 +56,11 @@ def normalize_op_filters(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     base["whitelist_words"] = [str(w) for w in wl if w]
     # Missing field (legacy jobs) → all
     base["content_type"] = normalize_content_type(raw.get("content_type", "all"))
+    base["size_filter_enabled"] = bool(raw.get("size_filter_enabled", False))
+    try:
+        base["min_media_size"] = max(0, int(raw.get("min_media_size") or 0))
+    except (TypeError, ValueError):
+        base["min_media_size"] = 0
     return base
 
 
@@ -75,6 +82,10 @@ def merge_settings_for_forward(
         settings["whitelist_mode"] = bool(op["whitelist_enabled"])
         settings["whitelist"] = list(op["whitelist_words"])
         settings["content_type"] = op.get("content_type") or "all"
+        settings["size_filter_enabled"] = bool(op.get("size_filter_enabled"))
+        settings["min_media_size"] = int(op.get("min_media_size") or 0)
     else:
         settings.setdefault("content_type", "all")
+        settings.setdefault("size_filter_enabled", False)
+        settings.setdefault("min_media_size", 0)
     return settings

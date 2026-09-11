@@ -455,6 +455,17 @@ async def forward_messages(
             reply_markup = build_inline_keyboard(settings)
 
             try:
+                # Completion sticker for previous title must go BEFORE this file,
+                # otherwise sticker appears after the first quality of the next movie.
+                if job_id:
+                    try:
+                        from core.completion_sticker import prepare_before_forward
+                        await prepare_before_forward(
+                            current_client, user_id, job_id, target_chat_id, message
+                        )
+                    except Exception:
+                        logger.exception("completion sticker prepare failed")
+
                 await send_one(
                     current_client,
                     source_chat_id,
@@ -466,6 +477,15 @@ async def forward_messages(
                     use_rich_message=bool(settings.get("rich_message_enabled")),
                 )
                 stats.forwarded += 1
+
+                if job_id:
+                    try:
+                        from core.completion_sticker import on_successful_forward
+                        await on_successful_forward(
+                            current_client, user_id, job_id, target_chat_id, message
+                        )
+                    except Exception:
+                        logger.exception("completion sticker hook failed")
 
                 # Claim only after successful send
                 try:

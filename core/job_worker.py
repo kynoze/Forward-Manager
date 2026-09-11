@@ -760,20 +760,26 @@ async def run_single_job(job: dict):
             logger.info("Job %s worker stopped (paused reason=%s)", job_id, pr or st)
             RUNNING_JOB_TASKS.pop(job_id, None)
             return
-        await set_job_status(user_id, job_id, JobStatus.CANCELLED.value)
-        logger.info("Job %s cancelled", job_id)
-        if pr not in ("user", "deleted_or_stopped", PAUSE_REASON_ACCOUNTS):
-            try:
-                from core.log_chat import report_user_auto_stop
-                await report_user_auto_stop(
-                    user_id,
-                    feature="Jobs",
-                    title=fresh.get("name") or job_id,
-                    reason="Job task was cancelled by the system (not a user Stop tap).",
-                    error=pr or "CancelledError",
-                )
-            except Exception:
-                pass
+        # Explicit cancel already persisted CANCELLED (delete/stop)
+        if st == JobStatus.CANCELLED.value or pr in ("deleted_or_stopped", "user_cancel"):
+            logger.info("Job %s worker stopped (cancelled reason=%s)", job_id, pr or st)
+            RUNNING_JOB_TASKS.pop(job_id, None)
+            return
+        # Still RUNNING in DB → bot restart/redeploy cancelled the in-memory task.
+        # Leave status RUNNING so job_worker_loop auto-resumes from current_msg_id.
+        if st == JobStatus.RUNNING.value:
+            logger.info(
+                "Job %s worker cancelled while RUNNING — left RUNNING for boot resume",
+                job_id,
+            )
+            RUNNING_JOB_TASKS.pop(job_id, None)
+            return
+        # Unknown / other terminal states — do not force-cancel
+        logger.info(
+            "Job %s worker CancelledError with status=%s reason=%s — no status change",
+            job_id, st, pr,
+        )
+        RUNNING_JOB_TASKS.pop(job_id, None)
     except Exception as e:
         logger.exception("Job %s crashed", job_id)
         await set_job_status(user_id, job_id, JobStatus.FAILED.value, "Internal error — check logs")
@@ -804,6 +810,7 @@ async def forward_job_range(
     rotation_cb,
     start_id: int,
     end_id: int,
+    flush_completion_on_target_end: bool = True,
 ) -> int:
     """Forward range target-by-target (complete one before the next).
 
@@ -812,6 +819,12 @@ async def forward_job_range(
       - current_msg_id: last completed source message id *within that target*
     On resume after account sleep, only the active target continues from current_msg_id.
     Finished targets are not restarted from the shared cursor.
+
+    flush_completion_on_target_end:
+      True  → historical range: after a target finishes, close open movie/series group
+      False → future-post windows: do NOT close the open group (more qualities of the
+              same title may arrive in the next poll). Stickers fire on title-change
+              inside prepare_before_forward, or when monitoring stops.
     """
     user_id = job["user_id"]
     job_id = job["job_id"]
@@ -897,8 +910,19 @@ async def forward_job_range(
             total_forwarded += int(getattr(stats, "forwarded", 0) or 0)
 
         # Paused mid-target (accounts sleeping) — keep current_target_index=i
+        # Do not flush the open movie/series group yet — resume continues it.
         if not await job_still_running(user_id, job_id):
             return total_forwarded
+
+        if flush_completion_on_target_end:
+            try:
+                from core.completion_sticker import flush_active_group
+                await flush_active_group(client, user_id, job_id, target_chat_id)
+            except Exception:
+                logger.exception(
+                    "completion sticker flush failed job=%s target=%s",
+                    job_id, target_chat_id,
+                )
 
         # Target fully done → pin watermark at end_id (never drop to base_skip)
         # Next target resumes from base_skip via msg_skip logic, but high_water stays high.
@@ -910,6 +934,21 @@ async def forward_job_range(
         logger.info("Job %s finished target %s/%s", job_id, i + 1, len(targets))
 
     return total_forwarded
+
+
+async def _flush_all_completion_targets(client, user_id: int, job_id: str, job: dict) -> None:
+    """Close open movie/series groups for every job target (monitor stop / job end)."""
+    try:
+        from core.completion_sticker import flush_active_group
+        for t in (job.get("target_chat_ids") or []):
+            try:
+                await flush_active_group(client, user_id, job_id, int(t))
+            except Exception:
+                logger.exception(
+                    "completion sticker flush failed job=%s target=%s", job_id, t
+                )
+    except Exception:
+        logger.exception("completion sticker flush-all failed job=%s", job_id)
 
 
 async def monitor_future_posts(job: dict, client: Client, current_account_id, rotation_cb):
@@ -929,6 +968,8 @@ async def monitor_future_posts(job: dict, client: Client, current_account_id, ro
         # Must stay RUNNING — pause/stop ends monitoring immediately
         if not await job_still_running(user_id, job_id):
             logger.info("Job %s monitor exit — not running", job_id)
+            fresh = await get_job(user_id, job_id) or job
+            await _flush_all_completion_targets(client, user_id, job_id, fresh)
             return
 
         fresh = await get_job(user_id, job_id)
@@ -940,6 +981,7 @@ async def monitor_future_posts(job: dict, client: Client, current_account_id, ro
             return
         # Monitoring toggle must stay ON
         if not fresh.get("future_new_posts"):
+            await _flush_all_completion_targets(client, user_id, job_id, fresh)
             await set_job_status(user_id, job_id, JobStatus.COMPLETED.value)
             logger.info("Job %s future posts turned OFF — completed", job_id)
             try:
@@ -1003,6 +1045,10 @@ async def monitor_future_posts(job: dict, client: Client, current_account_id, ro
                 rotation_cb=rotation_cb,
                 start_id=cursor,
                 end_id=latest,
+                # Keep open movie/series group across future poll windows so
+                # sticker fires on title change (or when monitor stops), not
+                # after every 1–2 message batch.
+                flush_completion_on_target_end=False,
             )
             # Window done: park cursor at latest and mark all targets complete
             # (t_idx=0 after a window was wrongly treated as "historical incomplete")
