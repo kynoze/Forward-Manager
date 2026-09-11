@@ -22,6 +22,8 @@ class Config:
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
     MONGO_URI = os.environ.get("MONGO_URI", "")
     DB_NAME = os.environ.get("DB_NAME", "cloner_boy")
+    # MongoDB Atlas free-tier style limit (display only)
+    ATLAS_STORAGE_LIMIT_MB = float(os.environ.get("ATLAS_STORAGE_LIMIT_MB", "512"))
     ADMINS = _int_list(os.environ.get("ADMINS", ""))
     # Bot owner(s). If empty, first ADMIN is treated as owner.
     OWNER_IDS = _int_list(os.environ.get("OWNER_IDS", "") or os.environ.get("OWNER_ID", ""))
