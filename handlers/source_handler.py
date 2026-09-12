@@ -37,6 +37,46 @@ LINK_RE = re.compile(
     r"(https?://)?(t\.me|telegram\.me|telegram\.dog)/(c/)?([a-zA-Z0-9_]+|\d+)/(\d+)"
 )
 
+# Flows that are waiting for free-form text (NOT a source chat).
+# Their prompts often include t.me URLs (inline buttons, captions, …)
+# which must not be treated as a new source.
+_TEXT_INPUT_STATE_NAMES = (
+    "settings_state",
+    "target_add_state",
+    "job_filter_state",
+    "qf_filter_state",
+    "job_rename_state",
+    "job_progress_ui_state",
+    "job_interval_state",
+    "log_chat_state",
+    "jobs_log_channel_state",
+    "account_add_state",
+    "account_edit_state",
+    "bot_add_state",
+    "job_sticker_state",
+    "job_acc_state",
+    "forward_state",
+    "db_config_state",
+)
+
+
+def _text_input_flow_owns(client: Client, user_id: int) -> bool:
+    """True when a non-source conversation is waiting for the next text message."""
+    st = get_state(client, "settings_state", user_id)
+    if isinstance(st, dict) and st.get("action"):
+        return True
+    for name in _TEXT_INPUT_STATE_NAMES:
+        if name == "settings_state":
+            continue
+        if get_state(client, name, user_id):
+            return True
+    js = get_state(client, "job_create_state", user_id) or {}
+    # step == "source" is handled below as a real source; other create
+    # steps (name, skip, …) must keep t.me text for themselves.
+    if isinstance(js, dict) and js.get("step") and js.get("step") != "source":
+        return True
+    return False
+
 
 def build_source_options_keyboard(source_chat_id, last_msg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -162,8 +202,6 @@ async def source_detector(client: Client, message: Message):
     await ensure_user(user_id)
 
     source_chat_id, last_msg_id, err = parse_source_from_message(message)
-    if err:
-        return await message.reply(err)
 
     from core.state import get_state
 
@@ -173,6 +211,18 @@ async def source_detector(client: Client, message: Message):
         from handlers.cnl_handlers import handle_cnl_text
         if await handle_cnl_text(client, message):
             return
+
+    # Target settings / other text prompts own t.me links (inline URL buttons).
+    # Without this, source_detector runs first (plugin load order), calls
+    # get_chat() on the management bot, fails, and the button is never saved.
+    if _text_input_flow_owns(client, user_id):
+        if message.text:
+            from handlers.text_input_handlers import handle_all_text_input
+            await handle_all_text_input(client, message)
+        return
+
+    if err:
+        return await message.reply(err)
 
     # Wroxen / Indexing flows own the next source message.
     wroxen_state = get_state(client, "wroxen_state", user_id) or {}
