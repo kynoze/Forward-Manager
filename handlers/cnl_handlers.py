@@ -821,8 +821,9 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
         if not rule:
             return await query.answer("Rule not found", show_alert=True)
         from core.content_type import (
-            CONTENT_ALL, CONTENT_MOVIES, CONTENT_SERIES,
-            content_type_label, normalize_content_type,
+            content_type_button_rows,
+            content_type_label,
+            normalize_content_type,
         )
         if len(parts) >= 5:
             mode = normalize_content_type(parts[4])
@@ -831,20 +832,23 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
             await _show_rule(client, query, user_id, sid, tid)
             return await safe_answer(query)
         cur = normalize_content_type(rule.get("content_type"))
-        def _m(mode, label):
-            return ("● " if cur == mode else "") + label
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(_m(CONTENT_ALL, "📦 All Content"), callback_data=f"cnl:rct:{sid}:{tid}:all")],
-            [InlineKeyboardButton(_m(CONTENT_MOVIES, "🎬 Movies Only"), callback_data=f"cnl:rct:{sid}:{tid}:movies")],
-            [InlineKeyboardButton(_m(CONTENT_SERIES, "📺 Series Only"), callback_data=f"cnl:rct:{sid}:{tid}:series")],
-            [InlineKeyboardButton("« Back", callback_data=_rule_back(sid, tid))],
-        ])
+        kb_rows = [
+            [InlineKeyboardButton(label, callback_data=f"cnl:rct:{sid}:{tid}:{mode}")]
+            for spec_row in content_type_button_rows(cur, long=True)
+            for mode, label in spec_row
+        ]
+        kb_rows.append([InlineKeyboardButton("« Back", callback_data=_rule_back(sid, tid))])
+        kb = InlineKeyboardMarkup(kb_rows)
         await safe_edit(
             query,
             f"**🎬 Content Type**\n\n"
             f"Current: {content_type_label(cur)}\n\n"
-            "Movies Only / Series Only use title + filename (S01E01, Season, Episode).\n"
-            "Unknown titles are skipped when Movies or Series is selected.",
+            "Detection uses **PTT (parsett)** on caption + filename "
+            "(S01E01 / Season / Episode → series; title + year/quality → movie).\n\n"
+            "• **All** — everything, including unknown titles\n"
+            "• **Movies Only** — movies only; skip series and unknown\n"
+            "• **Series Only** — series/shows only; skip movies and unknown\n"
+            "• **Movies + Series** — movies AND series/shows; skip everything else",
             kb,
         )
         return await safe_answer(query)
@@ -1886,8 +1890,9 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
             return await cnl_callbacks(client, query)
         elif action == "ct":
             from core.content_type import (
-                CONTENT_ALL, CONTENT_MOVIES, CONTENT_SERIES,
-                content_type_label, normalize_content_type,
+                content_type_button_rows,
+                content_type_label,
+                normalize_content_type,
             )
             if len(parts) > 3:
                 mode = normalize_content_type(parts[3])
@@ -1896,19 +1901,19 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
                 gc = await cnl.get_global_copy(user_id) or {}
             else:
                 cur = normalize_content_type(gc.get("content_type"))
-                def _m(mode, label):
-                    return ("● " if cur == mode else "") + label
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(_m(CONTENT_ALL, "📦 All Content"), callback_data="cnl:gcopy:ct:all")],
-                    [InlineKeyboardButton(_m(CONTENT_MOVIES, "🎬 Movies Only"), callback_data="cnl:gcopy:ct:movies")],
-                    [InlineKeyboardButton(_m(CONTENT_SERIES, "📺 Series Only"), callback_data="cnl:gcopy:ct:series")],
-                    [InlineKeyboardButton("« Back", callback_data="cnl:gcopy")],
-                ])
+                kb_rows = [
+                    [InlineKeyboardButton(label, callback_data=f"cnl:gcopy:ct:{mode}")]
+                    for spec_row in content_type_button_rows(cur, long=True)
+                    for mode, label in spec_row
+                ]
+                kb_rows.append([InlineKeyboardButton("« Back", callback_data="cnl:gcopy")])
+                kb = InlineKeyboardMarkup(kb_rows)
                 await safe_edit(
                     query,
                     f"**🎬 Global Copy — Content Type**\n\n"
                     f"Current: {content_type_label(cur)}\n\n"
-                    "Unknown titles are skipped when Movies or Series is selected.",
+                    "Detection uses **PTT (parsett)** on caption + filename.\n"
+                    "**Movies + Series** forwards both movies and shows; unknown titles are skipped.",
                     kb,
                 )
                 return await safe_answer(query)
