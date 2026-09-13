@@ -181,15 +181,12 @@ def _job_filters_kb(job: dict):
             row = []
     if row:
         rows.append(row)
-    from core.content_type import CONTENT_ALL, CONTENT_MOVIES, CONTENT_SERIES, normalize_content_type
-    cur_ct = normalize_content_type(f.get("content_type"))
-    def _ct_mark(mode, label):
-        return ("● " if cur_ct == mode else "") + label
-    rows.append([
-        InlineKeyboardButton(_ct_mark(CONTENT_ALL, "📦 All"), callback_data=f"job:ft:{job_id}:ct:all"),
-        InlineKeyboardButton(_ct_mark(CONTENT_MOVIES, "🎬 Movies"), callback_data=f"job:ft:{job_id}:ct:movies"),
-        InlineKeyboardButton(_ct_mark(CONTENT_SERIES, "📺 Series"), callback_data=f"job:ft:{job_id}:ct:series"),
-    ])
+    from core.content_type import content_type_button_rows
+    for spec_row in content_type_button_rows(f.get("content_type"), long=False):
+        rows.append([
+            InlineKeyboardButton(label, callback_data=f"job:ft:{job_id}:ct:{mode}")
+            for mode, label in spec_row
+        ])
     be = "ON" if f.get("block_enabled") else "OFF"
     we = "ON" if f.get("whitelist_enabled") else "OFF"
     rows.append([
