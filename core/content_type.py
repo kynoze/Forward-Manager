@@ -10,9 +10,10 @@ Returns:
     "movie" | "series" | "unknown"
 
 Unknown is never treated as a movie or a series. Settings:
-    all     → allow unknown
-    movies  → skip unknown and series
-    series  → skip unknown and movies
+    all            → allow unknown
+    movies         → skip unknown and series
+    series         → skip unknown and movies
+    movies_series  → allow movie AND series/show; skip unknown and everything else
 """
 from __future__ import annotations
 
@@ -25,12 +26,19 @@ logger = logging.getLogger(__name__)
 CONTENT_ALL = "all"
 CONTENT_MOVIES = "movies"
 CONTENT_SERIES = "series"
-VALID_CONTENT_TYPES = (CONTENT_ALL, CONTENT_MOVIES, CONTENT_SERIES)
+CONTENT_MOVIES_SERIES = "movies_series"
+VALID_CONTENT_TYPES = (
+    CONTENT_ALL,
+    CONTENT_MOVIES,
+    CONTENT_SERIES,
+    CONTENT_MOVIES_SERIES,
+)
 
 CONTENT_TYPE_LABELS = {
     CONTENT_ALL: "📦 All Content",
     CONTENT_MOVIES: "🎬 Movies Only",
     CONTENT_SERIES: "📺 Series Only",
+    CONTENT_MOVIES_SERIES: "🎬📺 Movies + Series",
 }
 
 # Season / episode patterns (reference clone.py + common scene names).
@@ -138,15 +146,55 @@ def _normalize_for_match(text: str) -> str:
 
 def normalize_content_type(raw: Any) -> str:
     v = str(raw or CONTENT_ALL).strip().lower()
+    v = re.sub(r"[\s+\-/]+", "_", v)
+    v = re.sub(r"_+", "_", v).strip("_")
     if v in ("movie", "movies"):
         return CONTENT_MOVIES
-    if v in ("series", "show", "shows", "tv", "tvshow", "tv-show"):
+    if v in ("series", "show", "shows", "tv", "tvshow", "tv_show"):
         return CONTENT_SERIES
+    if v in (
+        CONTENT_MOVIES_SERIES,
+        "movie_series",
+        "movieseries",
+        "movies_and_series",
+        "movie_and_series",
+        "both",
+        "films_series",
+        "movies_shows",
+        "movie_show",
+    ):
+        return CONTENT_MOVIES_SERIES
     return CONTENT_ALL
 
 
 def content_type_label(raw: Any) -> str:
     return CONTENT_TYPE_LABELS[normalize_content_type(raw)]
+
+
+def content_type_button_rows(current: Any, *, long: bool = False) -> list[list[tuple[str, str]]]:
+    """Rows of (mode, marked_label) for Jobs / QF / CNL keyboards."""
+    cur = normalize_content_type(current)
+
+    def mark(mode: str, label: str) -> str:
+        return ("● " if cur == mode else "") + label
+
+    if long:
+        return [
+            [(CONTENT_ALL, mark(CONTENT_ALL, "📦 All Content"))],
+            [(CONTENT_MOVIES, mark(CONTENT_MOVIES, "🎬 Movies Only"))],
+            [(CONTENT_SERIES, mark(CONTENT_SERIES, "📺 Series Only"))],
+            [(CONTENT_MOVIES_SERIES, mark(CONTENT_MOVIES_SERIES, "🎬📺 Movies + Series"))],
+        ]
+    return [
+        [
+            (CONTENT_ALL, mark(CONTENT_ALL, "📦 All")),
+            (CONTENT_MOVIES, mark(CONTENT_MOVIES, "🎬 Movies")),
+            (CONTENT_SERIES, mark(CONTENT_SERIES, "📺 Series")),
+        ],
+        [
+            (CONTENT_MOVIES_SERIES, mark(CONTENT_MOVIES_SERIES, "🎬📺 Movies + Series")),
+        ],
+    ]
 
 
 def _ptt_parse(text: str) -> dict:
@@ -409,7 +457,9 @@ def content_type_allows(kind: str, setting: Any) -> bool:
         return kind == "movie"
     if setting == CONTENT_SERIES:
         return kind == "series"
-    return True
+    if setting == CONTENT_MOVIES_SERIES:
+        return kind in ("movie", "series")
+    return False
 
 
 def content_filter_reason(kind: str, setting: Any) -> str:
@@ -422,6 +472,7 @@ def content_filter_log_line(kind: str, setting: Any) -> str:
     label = {
         CONTENT_MOVIES: "Movies Only",
         CONTENT_SERIES: "Series Only",
+        CONTENT_MOVIES_SERIES: "Movies + Series",
     }.get(setting, setting)
     return f"[CONTENT_FILTER] Skipped {kind or 'unknown'}: {label}"
 
