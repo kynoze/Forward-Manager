@@ -821,9 +821,8 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
         if not rule:
             return await query.answer("Rule not found", show_alert=True)
         from core.content_type import (
-            content_type_button_rows,
-            content_type_label,
-            normalize_content_type,
+            CONTENT_ALL, CONTENT_MOVIES, CONTENT_SERIES,
+            content_type_label, normalize_content_type,
         )
         if len(parts) >= 5:
             mode = normalize_content_type(parts[4])
@@ -832,23 +831,20 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
             await _show_rule(client, query, user_id, sid, tid)
             return await safe_answer(query)
         cur = normalize_content_type(rule.get("content_type"))
-        kb_rows = [
-            [InlineKeyboardButton(label, callback_data=f"cnl:rct:{sid}:{tid}:{mode}")]
-            for spec_row in content_type_button_rows(cur, long=True)
-            for mode, label in spec_row
-        ]
-        kb_rows.append([InlineKeyboardButton("« Back", callback_data=_rule_back(sid, tid))])
-        kb = InlineKeyboardMarkup(kb_rows)
+        def _m(mode, label):
+            return ("● " if cur == mode else "") + label
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(_m(CONTENT_ALL, "📦 All Content"), callback_data=f"cnl:rct:{sid}:{tid}:all")],
+            [InlineKeyboardButton(_m(CONTENT_MOVIES, "🎬 Movies Only"), callback_data=f"cnl:rct:{sid}:{tid}:movies")],
+            [InlineKeyboardButton(_m(CONTENT_SERIES, "📺 Series Only"), callback_data=f"cnl:rct:{sid}:{tid}:series")],
+            [InlineKeyboardButton("« Back", callback_data=_rule_back(sid, tid))],
+        ])
         await safe_edit(
             query,
             f"**🎬 Content Type**\n\n"
             f"Current: {content_type_label(cur)}\n\n"
-            "Detection uses **PTT (parsett)** on caption + filename "
-            "(S01E01 / Season / Episode → series; title + year/quality → movie).\n\n"
-            "• **All** — everything, including unknown titles\n"
-            "• **Movies Only** — movies only; skip series and unknown\n"
-            "• **Series Only** — series/shows only; skip movies and unknown\n"
-            "• **Movies + Series** — movies AND series/shows; skip everything else",
+            "Movies Only / Series Only use title + filename (S01E01, Season, Episode).\n"
+            "Unknown titles are skipped when Movies or Series is selected.",
             kb,
         )
         return await safe_answer(query)
@@ -1670,9 +1666,34 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
                 if (a.get("status") or "").lower() == AccountStatus.DISABLED.value:
                     return await query.answer("This account is disabled", show_alert=True)
                 aid = str(a.get("account_id") or aid)
+                old_aid = str(gc.get("my_account_id") or "") if gc else ""
                 await cnl.update_global_copy_filters(user_id, {"my_account_id": aid})
                 gc = await cnl.get_global_copy(user_id) or {}
-                await query.answer(f"✅ Account selected: {a.get('name') or aid}")
+                # If Global Copy is already ON, start the newly selected account client
+                # (previously only Enable called acquire — account change did nothing).
+                if gc.get("enabled"):
+                    try:
+                        from core.lifecycle import acquire_my_account, release_my_account
+                        if old_aid and old_aid != aid:
+                            await release_my_account(user_id, old_aid, "cnl:gcopy")
+                        ok, msg = await acquire_my_account(user_id, aid, "cnl:gcopy")
+                        if not ok:
+                            await query.answer(
+                                f"Account saved but client failed: {msg}",
+                                show_alert=True,
+                            )
+                        else:
+                            await query.answer(
+                                f"✅ Account selected & running: {a.get('name') or aid}"
+                            )
+                    except Exception:
+                        logger.exception("gcopy accset acquire user=%s", user_id)
+                        await query.answer(
+                            f"✅ Account selected: {a.get('name') or aid} (start error — check logs)",
+                            show_alert=True,
+                        )
+                else:
+                    await query.answer(f"✅ Account selected: {a.get('name') or aid}")
             else:
                 rows = []
                 for a in accs[:20]:
@@ -1890,9 +1911,8 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
             return await cnl_callbacks(client, query)
         elif action == "ct":
             from core.content_type import (
-                content_type_button_rows,
-                content_type_label,
-                normalize_content_type,
+                CONTENT_ALL, CONTENT_MOVIES, CONTENT_SERIES,
+                content_type_label, normalize_content_type,
             )
             if len(parts) > 3:
                 mode = normalize_content_type(parts[3])
@@ -1901,19 +1921,19 @@ async def cnl_callbacks(client: Client, query: CallbackQuery):
                 gc = await cnl.get_global_copy(user_id) or {}
             else:
                 cur = normalize_content_type(gc.get("content_type"))
-                kb_rows = [
-                    [InlineKeyboardButton(label, callback_data=f"cnl:gcopy:ct:{mode}")]
-                    for spec_row in content_type_button_rows(cur, long=True)
-                    for mode, label in spec_row
-                ]
-                kb_rows.append([InlineKeyboardButton("« Back", callback_data="cnl:gcopy")])
-                kb = InlineKeyboardMarkup(kb_rows)
+                def _m(mode, label):
+                    return ("● " if cur == mode else "") + label
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(_m(CONTENT_ALL, "📦 All Content"), callback_data="cnl:gcopy:ct:all")],
+                    [InlineKeyboardButton(_m(CONTENT_MOVIES, "🎬 Movies Only"), callback_data="cnl:gcopy:ct:movies")],
+                    [InlineKeyboardButton(_m(CONTENT_SERIES, "📺 Series Only"), callback_data="cnl:gcopy:ct:series")],
+                    [InlineKeyboardButton("« Back", callback_data="cnl:gcopy")],
+                ])
                 await safe_edit(
                     query,
                     f"**🎬 Global Copy — Content Type**\n\n"
                     f"Current: {content_type_label(cur)}\n\n"
-                    "Detection uses **PTT (parsett)** on caption + filename.\n"
-                    "**Movies + Series** forwards both movies and shows; unknown titles are skipped.",
+                    "Unknown titles are skipped when Movies or Series is selected.",
                     kb,
                 )
                 return await safe_answer(query)
