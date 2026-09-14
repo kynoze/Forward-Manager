@@ -646,13 +646,20 @@ async def process_global_copy(client: Client, message: Message, owner_id: int):
         return
     if not gc.get("my_account_id"):
         return
+    try:
+        target_id = int(gc["target_chat_id"])
+    except (TypeError, ValueError):
+        return
+    # Never re-copy from the target itself (prevents loops / noise)
+    if message.chat and int(message.chat.id) == target_id:
+        return
     anti = bool(gc.get("anti_dupe"))
     if anti:
         info = await cnl.get_dupe_db_info(owner_id) or {}
         if not (info.get("enabled") and info.get("has_uri")):
             anti = False  # require custom dupe DB
     rule = {
-        "target_chat_id": int(gc["target_chat_id"]),
+        "target_chat_id": target_id,
         "owner_id": owner_id,
         "enabled": True,
         "allowed_types": gc.get("allowed_types") or ["all"],
