@@ -513,14 +513,23 @@ async def job_still_running(user_id: int, job_id: str) -> bool:
 
 
 async def _bump_progress_cursor(user_id: int, job_id: str, msg_id: int, **extra):
-    """Advance current_msg_id / high_water_msg_id upward only (never backwards)."""
+    """Advance current_msg_id / high_water_msg_id upward only (never backwards).
+
+    Pass reset_current_to=N in extra to force current_msg_id down (used when
+    switching to the next target so the shared range is re-applied from the
+    window start). high_water_msg_id still only moves upward.
+    """
     fresh = await get_job(user_id, job_id) or {}
     skip = int(fresh.get("skip") or 0)
     prev = int(fresh.get("current_msg_id") or 0)
     hw = int(fresh.get("high_water_msg_id") or 0)
     mid = int(msg_id or 0)
-    new_cur = max(prev, mid, skip)
-    new_hw = max(hw, new_cur, skip)
+    reset_to = extra.pop("reset_current_to", None)
+    if reset_to is not None:
+        new_cur = int(reset_to)
+    else:
+        new_cur = max(prev, mid, skip)
+    new_hw = max(hw, mid, new_cur, skip)
     payload = {"current_msg_id": new_cur, "high_water_msg_id": new_hw}
     payload.update(extra)
     await update_job(user_id, job_id, payload)
@@ -862,12 +871,23 @@ async def forward_job_range(
         target_chat_id = targets[i]
         target = await get_target(user_id, target_chat_id)
         if not target:
-            await _bump_progress_cursor(
-                user_id, job_id, base_skip, current_target_index=i + 1,
-            )
+            # Skip missing target; reset cursor so next target starts from window start
+            next_idx = i + 1
+            if next_idx < len(targets):
+                await _bump_progress_cursor(
+                    user_id, job_id, base_skip,
+                    current_target_index=next_idx,
+                    reset_current_to=base_skip,
+                )
+            else:
+                await _bump_progress_cursor(
+                    user_id, job_id, base_skip, current_target_index=next_idx,
+                )
             continue
 
-        # Active target: resume from current_msg_id; ensure index is set
+        # Active target: resume from current_msg_id within this target.
+        # When we just switched onto this target (index was advanced + current
+        # reset to base_skip), current_msg_id is already the window start.
         fresh = await get_job(user_id, job_id) or job
         if int(fresh.get("current_target_index") or 0) != i:
             await update_job(user_id, job_id, {"current_target_index": i})
@@ -877,11 +897,21 @@ async def forward_job_range(
             msg_skip = int(cur) if cur is not None else base_skip
 
         if end_id <= msg_skip:
-            # Range already done for this target — advance index, keep watermark high
-            await _bump_progress_cursor(
-                user_id, job_id, max(end_id, msg_skip, base_skip),
-                current_target_index=i + 1,
-            )
+            # Range already done for this target — advance index.
+            # If more targets remain, reset current_msg_id to base_skip so the
+            # next target re-applies the same historical window from the start.
+            next_idx = i + 1
+            if next_idx < len(targets):
+                await _bump_progress_cursor(
+                    user_id, job_id, max(end_id, msg_skip, base_skip),
+                    current_target_index=next_idx,
+                    reset_current_to=base_skip,
+                )
+            else:
+                await _bump_progress_cursor(
+                    user_id, job_id, max(end_id, msg_skip, base_skip),
+                    current_target_index=next_idx,
+                )
             continue
 
         logger.info(
@@ -924,13 +954,23 @@ async def forward_job_range(
                     job_id, target_chat_id,
                 )
 
-        # Target fully done → pin watermark at end_id (never drop to base_skip)
-        # Next target resumes from base_skip via msg_skip logic, but high_water stays high.
+        # Target fully done.
+        # - high_water pins at end_id (never drops)
+        # - if more targets remain, reset current_msg_id to base_skip so the
+        #   next target re-applies the same historical range from the start
+        # - if this was the last target, keep current_msg_id at end_id
         next_idx = i + 1
-        await _bump_progress_cursor(
-            user_id, job_id, end_id,
-            current_target_index=next_idx,
-        )
+        if next_idx < len(targets):
+            await _bump_progress_cursor(
+                user_id, job_id, end_id,
+                current_target_index=next_idx,
+                reset_current_to=base_skip,
+            )
+        else:
+            await _bump_progress_cursor(
+                user_id, job_id, end_id,
+                current_target_index=next_idx,
+            )
         logger.info("Job %s finished target %s/%s", job_id, i + 1, len(targets))
 
     return total_forwarded

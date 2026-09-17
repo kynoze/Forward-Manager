@@ -185,7 +185,7 @@ async def _send_one(client: Client, chat_id: int, file_id: str, caption: str) ->
             return True
         except FloodWait as e:
             wait = int(getattr(e, "value", 5)) + 1
-            logger.warning("FloodWait %ss on index forward", wait)
+            logger.info("FloodWait %ss on index forward", wait)
             await asyncio.sleep(wait)
             attempts += 1
         except RPCError as e:

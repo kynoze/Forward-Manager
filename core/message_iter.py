@@ -50,7 +50,8 @@ async def custom_iter_messages(
             consecutive_failures = 0
         except FloodWait as e:
             wait = int(getattr(e, "value", 1) or 1) + 1
-            logger.warning("custom_iter_messages FloodWait %ss @%s", wait, current + 1)
+            # INFO — expected rate-limit; WARNING would spam owner log chat
+            logger.info("custom_iter_messages FloodWait %ss @%s", wait, current + 1)
             await asyncio.sleep(min(wait, 120))
             continue
         except Exception as e:

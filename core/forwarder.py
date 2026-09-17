@@ -186,7 +186,23 @@ async def send_one(
     forward_tag: bool,
     use_rich_message: bool = False,
 ):
-    if forward_tag:
+    # Native forward preserves original caption / no buttons — skip it when the
+    # caller already mutated the caption (replacements, template, remove_links)
+    # or attached inline buttons. Those features require copy / send_cached.
+    original_text = str(message.caption or message.text or "") or ""
+    final_str = None if final_caption is None else str(final_caption)
+    needs_custom_caption = final_str is not None and final_str != original_text
+    # Also treat explicit None-after-strip vs original non-empty as mutation
+    caption_was_cleared = final_str is None and bool(original_text.strip())
+    has_buttons = reply_markup is not None
+    can_native_forward = (
+        forward_tag
+        and not needs_custom_caption
+        and not caption_was_cleared
+        and not has_buttons
+    )
+
+    if can_native_forward:
         await client.forward_messages(
             chat_id=target_chat_id,
             from_chat_id=source_chat_id,
@@ -585,9 +601,13 @@ async def forward_messages(
 
             except (FloodWait, SlowmodeWait) as e:
                 wait = int(getattr(e, "value", 0) or 0)
-                logger.warning(
-                    "FloodWait %ss on account %s", wait, current_account_id
-                )
+                who = current_account_id or (f"bot:{bot_id}" if bot_id else "unknown")
+                # Short waits are normal Telegram rate-limits — do not WARNING
+                # (OwnerLogHandler would spam the owner log chat every minute).
+                if wait >= FLOODWAIT_ROTATE_AFTER:
+                    logger.warning("FloodWait %ss on %s (will try rotate)", wait, who)
+                else:
+                    logger.info("FloodWait %ss on %s — sleeping", wait, who)
                 if (
                     wait >= FLOODWAIT_ROTATE_AFTER
                     and get_new_client_callback

@@ -3,19 +3,31 @@ from typing import Any, Dict, Optional
 from pyrogram.types import Message
 
 
+def _normalize_media_type(raw) -> str:
+    """Map Pyrogram/Kurigram media enum/value to settings keys (photo, video, …)."""
+    if raw is None:
+        return ""
+    s = getattr(raw, "value", None) or str(raw)
+    s = str(s).strip()
+    if "." in s:
+        s = s.split(".")[-1]
+    return s.lower()
+
+
 def should_process_message(message: Message, settings: Dict[str, Any]) -> tuple[bool, str]:
     if getattr(message, "empty", False):
         return False, "deleted"
 
-    allowed_media = list(settings.get("media_types") or [])
-    allow_all = len(allowed_media) == 0
+    allowed_media = [_normalize_media_type(x) for x in (settings.get("media_types") or [])]
+    allowed_set = set(allowed_media)
+    allow_all = len(allowed_set) == 0
 
     if message.media:
-        media_type = message.media.value
-        if not allow_all and media_type not in allowed_media:
+        media_type = _normalize_media_type(message.media)
+        if not allow_all and media_type not in allowed_set:
             return False, f"media_type:{media_type}"
     else:
-        if not allow_all and "text" not in allowed_media:
+        if not allow_all and "text" not in allowed_set:
             return False, "media_type:text"
 
     # Movie / Series filter — after media type, before block/whitelist.
@@ -30,13 +42,14 @@ def should_process_message(message: Message, settings: Dict[str, Any]) -> tuple[
             return False, reason
 
     text_content = message.caption or message.text or ""
-    text_lower = text_content.lower()
+    text_lower = str(text_content).lower() if text_content else ""
 
-    if settings.get("block_words_enabled", True):
+    # Default OFF — matches DEFAULT_TARGET_SETTINGS (was True, which blocked unexpectedly)
+    if settings.get("block_words_enabled", False):
         block_words = settings.get("block_words", []) or []
         if block_words and text_lower:
             for word in block_words:
-                if word and word.lower() in text_lower:
+                if word and str(word).lower() in text_lower:
                     return False, f"blocked_word:{word}"
 
     if settings.get("whitelist_mode", False):

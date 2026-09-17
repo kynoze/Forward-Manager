@@ -64,28 +64,104 @@ def normalize_op_filters(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return base
 
 
+def _merge_word_lists(*lists: List) -> List[str]:
+    """Union of word lists, case-insensitive de-dupe, preserve first-seen order."""
+    seen = set()
+    out: List[str] = []
+    for lst in lists:
+        for w in lst or []:
+            s = str(w).strip()
+            if not s:
+                continue
+            key = s.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(s)
+    return out
+
+
 def merge_settings_for_forward(
     target_settings: Optional[Dict[str, Any]],
     op_filters: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Target settings as base; operation filters OVERRIDE media/block/whitelist layers.
+    """Target settings as base; job/op filters combine on top.
 
-    Target anti-duplicate / caption / buttons stay from target.
+    Always from target (never overridden by job filters):
+      delay, forward_tag, anti_duplicate, caption_*, replace_*,
+      remove_links, inline_buttons*, replacements
+
+    Job/op when provided:
+      content_type, size_filter_*  → from job
+      media_types → INTERSECTION of job + target (both must allow the type)
+        Target can further restrict Job Filters. To forward a type, enable it
+        on BOTH Job Filters and Target Media Types.
+
+    Block words / whitelist — BOTH target and job apply together:
+      - enabled if target ON **or** job ON
+      - word list = union of whichever sides are enabled
     """
-    settings = dict(target_settings or {})
+    # Shallow copy + explicit preserve of target-only features so later
+    # mutations never drop replacements / caption / buttons / delay.
+    src = target_settings or {}
+    settings: Dict[str, Any] = dict(src)
+    for key in (
+        "replace_enabled",
+        "replacements",
+        "caption_enabled",
+        "caption_template",
+        "rich_message_enabled",
+        "remove_links",
+        "inline_buttons_enabled",
+        "inline_buttons",
+        "forward_tag",
+        "delay",
+        "anti_duplicate",
+    ):
+        if key in src:
+            settings[key] = src[key]
+
+    # If user saved replacement rules but left the toggle OFF, still apply them
+    reps = settings.get("replacements") or []
+    if reps and not settings.get("replace_enabled"):
+        settings["replace_enabled"] = True
+
     op = normalize_op_filters(op_filters)
-    # Operation media types take precedence when op_filters provided
+
+    tgt_block_on = bool(settings.get("block_words_enabled", False))
+    tgt_block_words = list(settings.get("block_words") or []) if tgt_block_on else []
+    tgt_white_on = bool(settings.get("whitelist_mode", False))
+    tgt_white_words = list(settings.get("whitelist") or []) if tgt_white_on else []
+    tgt_media = [str(x).lower() for x in (settings.get("media_types") or []) if x]
+
     if op_filters is not None:
-        settings["media_types"] = list(op["media_types"])
-        settings["block_words_enabled"] = bool(op["block_enabled"])
-        settings["block_words"] = list(op["block_words"])
-        settings["whitelist_mode"] = bool(op["whitelist_enabled"])
-        settings["whitelist"] = list(op["whitelist_words"])
+        job_media = [str(m).lower() for m in op["media_types"]]
+        # Intersection: type forwarded only if BOTH Job Filters AND Target allow it.
+        # Default target includes all types → Job Filters alone control the set.
+        # Turning a type OFF on the Target further restricts jobs.
+        if tgt_media:
+            settings["media_types"] = [m for m in job_media if m in set(tgt_media)]
+        else:
+            settings["media_types"] = list(job_media)
+
         settings["content_type"] = op.get("content_type") or "all"
         settings["size_filter_enabled"] = bool(op.get("size_filter_enabled"))
         settings["min_media_size"] = int(op.get("min_media_size") or 0)
+
+        job_block_on = bool(op.get("block_enabled"))
+        job_block_words = list(op.get("block_words") or []) if job_block_on else []
+        job_white_on = bool(op.get("whitelist_enabled"))
+        job_white_words = list(op.get("whitelist_words") or []) if job_white_on else []
+
+        settings["block_words_enabled"] = tgt_block_on or job_block_on
+        settings["block_words"] = _merge_word_lists(tgt_block_words, job_block_words)
+
+        settings["whitelist_mode"] = tgt_white_on or job_white_on
+        settings["whitelist"] = _merge_word_lists(tgt_white_words, job_white_words)
     else:
         settings.setdefault("content_type", "all")
         settings.setdefault("size_filter_enabled", False)
         settings.setdefault("min_media_size", 0)
+        if tgt_media:
+            settings["media_types"] = tgt_media
     return settings

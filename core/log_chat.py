@@ -345,6 +345,15 @@ class OwnerLogHandler(logging.Handler):
             or "get_owner_log_chat db failed" in low
         ):
             return
+        # FloodWait / SlowmodeWait are expected rate-limits — collapse to one
+        # owner notice per logger every 10 minutes (varying "15s"/"16s" must
+        # not create unique rate keys that defeat the limiter).
+        is_flood = (
+            "floodwait" in low
+            or "slowmodewait" in low
+            or "flood wait" in low
+            or "slowmode wait" in low
+        )
         try:
             msg = self.format(record)
         except Exception:
@@ -355,10 +364,13 @@ class OwnerLogHandler(logging.Handler):
         level = "ERROR" if record.levelno >= logging.ERROR else "WARNING"
         low = (raw or "").lower()
         is_deprecation = "deprecated" in low or "will be removed" in low
-        # Rate key: deprecations collapse by message fingerprint; others by logger
+        # Rate key: deprecations / flood waits collapse; others by logger+msg
         if is_deprecation:
             rate_key = f"ownlog:depr:{(raw or '')[:120]}"
             window = 300.0  # same deprecation at most once per 5 min
+        elif is_flood:
+            rate_key = f"ownlog:flood:{name}:{record.funcName or '-'}"
+            window = 600.0  # at most once per 10 min per logger site
         else:
             rate_key = f"ownlog:{name}:{record.funcName}:{(raw or '')[:80]}"
             window = OWNER_RATE_SEC

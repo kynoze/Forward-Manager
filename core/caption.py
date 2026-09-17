@@ -4,14 +4,28 @@ from typing import Any, Dict, List, Optional
 
 
 def _replace_whole_word(text: str, old: str, new: str) -> str:
-    """Whole-word replace (CNL-compatible). Falls back to plain replace."""
+    """Whole-token replace (CNL-compatible).
+
+    Uses lookarounds instead of \\b so mentions like @username, #hashtags,
+    and other non-word prefixes actually match. \\b fails on @DFF_UPDATES
+    because @ is not a word character, so the leading boundary never fires.
+    """
     if not old:
         return text
     try:
-        pattern = re.compile(rf"\b{re.escape(old)}\b", flags=re.IGNORECASE)
+        # Boundary = not an alphanumeric/underscore on either side of the
+        # full "old" string. Works for @user, #tag, plain words, multi-word.
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_]){re.escape(old)}(?![A-Za-z0-9_])",
+            flags=re.IGNORECASE,
+        )
         return pattern.sub(new, text)
     except re.error:
-        return text.replace(old, new)
+        # Last resort: case-insensitive plain replace
+        try:
+            return re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
+        except re.error:
+            return text.replace(old, new)
 
 
 def _apply_replacements_cnl_style(text, replacements: list):
@@ -76,9 +90,11 @@ def _extract_source_text(message, *, plain: bool = False) -> str:
 def process_caption(message, settings: Dict[str, Any]) -> Optional[str]:
     # Any text-mutating step must start from plain caption — identical to CNL
     # process_original_text / clean_file_name path.
+    reps = settings.get("replacements") or []
+    replace_on = bool(settings.get("replace_enabled")) or bool(reps)
     needs_plain = bool(
         settings.get("remove_links")
-        or settings.get("replace_enabled")
+        or replace_on
         or settings.get("caption_enabled")
     )
     original = _extract_source_text(message, plain=needs_plain)
@@ -88,9 +104,10 @@ def process_caption(message, settings: Dict[str, Any]) -> Optional[str]:
 def apply_caption_text(original: str, settings: Dict[str, Any]) -> Optional[str]:
     caption = original or ""
 
-    if settings.get("replace_enabled", False):
-        replacements = settings.get("replacements", []) or []
-        caption = _apply_replacements_cnl_style(caption, replacements)
+    reps = settings.get("replacements", []) or []
+    # Apply when toggle ON *or* rules exist (toggle may have been left OFF after save)
+    if (settings.get("replace_enabled", False) or reps) and reps:
+        caption = _apply_replacements_cnl_style(caption, reps)
 
     if settings.get("remove_links", False):
         # Jobs / Quick Forward / Target settings — identical to CNL Auto Post
