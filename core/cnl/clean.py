@@ -75,6 +75,16 @@ def is_media_file_name(text: str) -> bool:
 
 def remove_links_and_usernames(text: str) -> str:
     """Minimal cleaning: links + usernames + Telegram hidden links only."""
+    # HTML mention / hyperlink wrappers (Kurigram .html path safety net)
+    # <a href="https://t.me/User">@User</a>  →  @User
+    text = re.sub(
+        r'<a\s+[^>]*href=["\'][^"\']*["\'][^>]*>(.*?)</a>',
+        r"\1",
+        text,
+        flags=re.I | re.S,
+    )
+    text = re.sub(r"</?a\b[^>]*>", "", text, flags=re.I)
+
     # Normal links
     text = re.sub(
         r"https?://\S+|www\.\S+|t\.me/\S+",
@@ -89,9 +99,9 @@ def remove_links_and_usernames(text: str) -> str:
     # Zero-width / invisible characters often used for hidden links
     text = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", text)
 
-    # Usernames in brackets
-    text = re.sub(r"\[\s*@[^]]+\]", "", text)
-    text = re.sub(r"\(\s*@[^)]+\)", "", text)
+    # Usernames / channel tags in brackets  [@Channel]  or  [Tg-@Channel]  or  (@Channel)
+    text = re.sub(r"\[[^\]]*@[^]]*\]", "", text)
+    text = re.sub(r"\([^\)]*@[^)]*\)", "", text)
 
     # Leading @username
     text = re.sub(r"^\s*@\S+\s*[-:|]?\s*", "", text)
@@ -126,6 +136,15 @@ def clean_file_name(file_name):
             break
     file_name = "\n\n".join(cleaned_parts)
 
+    # HTML mention / hyperlink wrappers (safety if HTML caption reaches here)
+    file_name = re.sub(
+        r'<a\s+[^>]*href=["\'][^"\']*["\'][^>]*>(.*?)</a>',
+        r"\1",
+        file_name,
+        flags=re.I | re.S,
+    )
+    file_name = re.sub(r"</?a\b[^>]*>", "", file_name, flags=re.I)
+
     # Links
     file_name = re.sub(
         r"https?://\S+|www\.\S+|t\.me/\S+", "", file_name, flags=re.I
@@ -135,12 +154,9 @@ def clean_file_name(file_name):
     # Zero-width chars
     file_name = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", file_name)
 
-    # Usernames in brackets
-    file_name = re.sub(r"\[\s*@[^]]+\]", "", file_name)
-    file_name = re.sub(r"\(\s*@[^)]+\)", "", file_name)
-
-    # (2025) → 2025
-    #file_name = re.sub(r"\(((?:19|20)\d{2})\)", r"\1", file_name)
+    # Usernames / channel tags in brackets  [@Channel]  or  [Tg-@Channel]  /  (@Channel)
+    file_name = re.sub(r"\[[^\]]*@[^]]*\]", "", file_name)
+    file_name = re.sub(r"\([^\)]*@[^)]*\)", "", file_name)
 
     # Leading @username
     file_name = re.sub(r"^\s*@\S+\s*[-:|]?\s*", "", file_name)
