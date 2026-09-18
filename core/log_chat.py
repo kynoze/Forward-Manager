@@ -336,13 +336,16 @@ class OwnerLogHandler(logging.Handler):
             raw = record.getMessage()
         except Exception:
             raw = ""
-        # Don't spam owner chat with Mongo Atlas network timeouts
+        # Don't spam owner chat with Mongo Atlas network timeouts /
+        # routine monitor "0 forwarded" noise (filters skipped the messages).
         low = (raw or "").lower()
         if (
             "serverselectiontimeout" in low
             or "serverselectiontimeouterror" in (record.exc_info[0].__name__.lower() if record.exc_info and record.exc_info[0] else "")
             or "mongodb unreachable" in low
             or "get_owner_log_chat db failed" in low
+            or "forwarded 0" in low
+            or "0 forwarded" in low
         ):
             return
         # FloodWait / SlowmodeWait are expected rate-limits — collapse to one
