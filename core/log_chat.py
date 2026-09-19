@@ -346,6 +346,8 @@ class OwnerLogHandler(logging.Handler):
             or "get_owner_log_chat db failed" in low
             or "forwarded 0" in low
             or "0 forwarded" in low
+            or "check accounts/filters" in low
+            or ("detected" in low and "forwarded" in low)
         ):
             return
         # FloodWait / SlowmodeWait are expected rate-limits — collapse to one
