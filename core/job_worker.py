@@ -1117,8 +1117,9 @@ async def monitor_future_posts(job: dict, client: Client, current_account_id, ro
             elif still:
                 # Normal when new source messages are filtered out (media type,
                 # block/whitelist, content type, size, duplicates, etc.).
-                # INFO only — WARNING was spamming owner log chat every poll.
-                logger.info(
+                # DEBUG only — never WARNING/INFO: owner log + app log were
+                # flooded every poll with "detected X→Y but forwarded 0".
+                logger.debug(
                     "Job %s monitor window %s→%s: 0 forwarded (filtered/skipped)",
                     job_id, cursor + 1, latest,
                 )
