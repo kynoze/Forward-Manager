@@ -60,7 +60,7 @@ _gc_flush_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
 _gc_buf_lock = asyncio.Lock()
 _gc_send_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
 # Debounce window to gather a bulk burst before sending in order
-_GC_ORDER_WAIT = 0.45
+_GC_ORDER_WAIT = 300
 
 
 # ── replacements / filters ─────────────────────────────────────────────────
