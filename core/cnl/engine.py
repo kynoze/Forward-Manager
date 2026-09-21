@@ -53,6 +53,15 @@ _album_tasks: Dict[Tuple[int, str, int], asyncio.Task] = {}
 _album_lock = asyncio.Lock()
 _forward_sem = asyncio.Semaphore(FORWARD_CONCURRENCY)
 
+# Global Copy bulk-order: collect concurrent arrivals, flush by message.id ascending
+# Key = (owner_id, source_chat_id)
+_gc_buffers: Dict[Tuple[int, int], List[Tuple[int, Client, Message, int]]] = defaultdict(list)
+_gc_flush_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
+_gc_buf_lock = asyncio.Lock()
+_gc_send_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
+# Debounce window to gather a bulk burst before sending in order
+_GC_ORDER_WAIT = 0.45
+
 
 # ── replacements / filters ─────────────────────────────────────────────────
 
@@ -637,7 +646,42 @@ async def _handle_album_message(client: Client, message: Message, rule: dict, ow
         _album_tasks[key] = asyncio.create_task(_flush())
 
 
-async def process_global_copy(client: Client, message: Message, owner_id: int):
+async def _gc_send_lock(key: Tuple[int, int]) -> asyncio.Lock:
+    async with _gc_buf_lock:
+        lock = _gc_send_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _gc_send_locks[key] = lock
+        return lock
+
+
+async def _flush_global_copy_batch(key: Tuple[int, int]) -> None:
+    """Wait briefly for bulk arrivals, then send in message.id order (one at a time)."""
+    try:
+        await asyncio.sleep(_GC_ORDER_WAIT)
+    except asyncio.CancelledError:
+        return
+    async with _gc_buf_lock:
+        batch = list(_gc_buffers.pop(key, []))
+        _gc_flush_tasks.pop(key, None)
+    if not batch:
+        return
+    # Stable chronological order from source chat
+    batch.sort(key=lambda item: int(item[0]))
+    send_lock = await _gc_send_lock(key)
+    async with send_lock:
+        for msg_id, client, message, owner_id in batch:
+            try:
+                await _process_global_copy_one(client, message, owner_id)
+            except Exception:
+                logger.exception(
+                    "CNL global copy ordered send fail owner=%s chat=%s msg=%s",
+                    owner_id, key[1], msg_id,
+                )
+
+
+async def _process_global_copy_one(client: Client, message: Message, owner_id: int) -> None:
+    """Actual Global Copy send for a single message (no ordering logic)."""
     cnl = await get_cnl(owner_id)
     if not cnl:
         return
@@ -650,14 +694,13 @@ async def process_global_copy(client: Client, message: Message, owner_id: int):
         target_id = int(gc["target_chat_id"])
     except (TypeError, ValueError):
         return
-    # Never re-copy from the target itself (prevents loops / noise)
     if message.chat and int(message.chat.id) == target_id:
         return
     anti = bool(gc.get("anti_dupe"))
     if anti:
         info = await cnl.get_dupe_db_info(owner_id) or {}
         if not (info.get("enabled") and info.get("has_uri")):
-            anti = False  # require custom dupe DB
+            anti = False
     rule = {
         "target_chat_id": target_id,
         "owner_id": owner_id,
@@ -680,3 +723,26 @@ async def process_global_copy(client: Client, message: Message, owner_id: int):
         "content_type": gc.get("content_type") or "all",
     }
     await process_and_forward(client, message, rule, owner_id)
+
+
+async def process_global_copy(client: Client, message: Message, owner_id: int):
+    """Enqueue Global Copy; bulk messages flush in source message.id order.
+
+    Pyrogram runs several handlers concurrently (workers>1). Without ordering,
+    target chat receives bulk uploads out of sequence. We buffer briefly per
+    (owner, source_chat), sort by message.id, then send one-by-one.
+    """
+    if not message or not message.chat:
+        return
+    try:
+        source_id = int(message.chat.id)
+        msg_id = int(message.id)
+    except (TypeError, ValueError):
+        return
+    key = (int(owner_id), source_id)
+    async with _gc_buf_lock:
+        _gc_buffers[key].append((msg_id, client, message, int(owner_id)))
+        prev = _gc_flush_tasks.get(key)
+        if prev and not prev.done():
+            prev.cancel()
+        _gc_flush_tasks[key] = asyncio.create_task(_flush_global_copy_batch(key))
