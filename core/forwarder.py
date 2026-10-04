@@ -46,11 +46,7 @@ from core.message_iter import custom_iter_messages
 
 logger = logging.getLogger(__name__)
 
-# Rotate accounts after this many seconds of FloodWait (behaviour only).
 FLOODWAIT_ROTATE_AFTER = 30
-# Only WARNING (→ owner log) for long waits. Telegram routinely returns
-# 30–40s; those must stay INFO so OwnerLogHandler does not spam.
-FLOODWAIT_OWNER_WARN_AFTER = 120
 PAUSE_REASON_ACCOUNTS = "accounts_unavailable"
 PROGRESS_EVERY = 10  # update progress message every N fetched msgs
 
@@ -614,25 +610,11 @@ async def forward_messages(
 
             except (FloodWait, SlowmodeWait) as e:
                 wait = int(getattr(e, "value", 0) or 0)
-                who = (
-                    current_account_id
-                    or (f"bot:{bot_id}" if bot_id else None)
-                    or (f"job:{job_id}" if job_id else None)
-                    or "client"
-                )
-                # Routine rate-limits stay INFO. OwnerLogHandler only sees
-                # WARNING+, so 30–40s FloodWait must never be WARNING or the
-                # owner log is spammed every rate-window (~10 min).
-                if wait >= FLOODWAIT_OWNER_WARN_AFTER:
-                    logger.warning(
-                        "FloodWait %ss on %s (long wait — will try rotate if possible)",
-                        wait,
-                        who,
-                    )
-                elif wait >= FLOODWAIT_ROTATE_AFTER:
-                    logger.info(
-                        "FloodWait %ss on %s — sleeping / try rotate", wait, who
-                    )
+                who = current_account_id or (f"bot:{bot_id}" if bot_id else "unknown")
+                # Short waits are normal Telegram rate-limits — do not WARNING
+                # (OwnerLogHandler would spam the owner log chat every minute).
+                if wait >= FLOODWAIT_ROTATE_AFTER:
+                    logger.warning("FloodWait %ss on %s (will try rotate)", wait, who)
                 else:
                     logger.info("FloodWait %ss on %s — sleeping", wait, who)
                 if (

@@ -336,32 +336,14 @@ class OwnerLogHandler(logging.Handler):
             raw = record.getMessage()
         except Exception:
             raw = ""
-        # Don't spam owner chat with Mongo Atlas network timeouts /
-        # routine monitor "0 forwarded" noise (filters skipped the messages).
+        # Don't spam owner chat with Mongo Atlas network timeouts
         low = (raw or "").lower()
         if (
             "serverselectiontimeout" in low
             or "serverselectiontimeouterror" in (record.exc_info[0].__name__.lower() if record.exc_info and record.exc_info[0] else "")
             or "mongodb unreachable" in low
             or "get_owner_log_chat db failed" in low
-            or "forwarded 0" in low
-            or "0 forwarded" in low
-            or "check accounts/filters" in low
-            or ("detected" in low and "forwarded" in low)
         ):
-            return
-        # FloodWait / SlowmodeWait are normal Telegram rate-limits during
-        # bulk forward — never forward to owner log (still appear in console
-        # at INFO). Long waits can still be logged WARNING in forwarder, but
-        # owner chat should stay clean.
-        is_flood = (
-            "floodwait" in low
-            or "slowmodewait" in low
-            or "flood wait" in low
-            or "slowmode wait" in low
-            or "will try rotate" in low
-        )
-        if is_flood and record.levelno < logging.ERROR:
             return
         try:
             msg = self.format(record)
@@ -373,7 +355,7 @@ class OwnerLogHandler(logging.Handler):
         level = "ERROR" if record.levelno >= logging.ERROR else "WARNING"
         low = (raw or "").lower()
         is_deprecation = "deprecated" in low or "will be removed" in low
-        # Rate key: deprecations collapse; others by logger+msg
+        # Rate key: deprecations collapse by message fingerprint; others by logger
         if is_deprecation:
             rate_key = f"ownlog:depr:{(raw or '')[:120]}"
             window = 300.0  # same deprecation at most once per 5 min

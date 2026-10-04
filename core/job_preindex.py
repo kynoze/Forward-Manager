@@ -68,8 +68,7 @@ def _status_paused() -> str:
 
 async def _sleep_flood(e: FloodWait):
     wait = int(getattr(e, "value", 1) or 1) + 1
-    # INFO — expected rate-limit during pre-index scans
-    logger.info("Pre-index FloodWait %ss", wait)
+    logger.warning("Pre-index FloodWait %ss", wait)
     await asyncio.sleep(min(wait, 120))
 
 

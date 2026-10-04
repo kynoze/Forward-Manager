@@ -1112,15 +1112,12 @@ async def monitor_future_posts(job: dict, client: Client, current_account_id, ro
                             + int(forwarded_n),
                         },
                     )
+                    pass  # quiet: no per-batch forward log
                 except Exception:
                     pass
             elif still:
-                # Normal when new source messages are filtered out (media type,
-                # block/whitelist, content type, size, duplicates, etc.).
-                # DEBUG only — never WARNING/INFO: owner log + app log were
-                # flooded every poll with "detected X→Y but forwarded 0".
-                logger.debug(
-                    "Job %s monitor window %s→%s: 0 forwarded (filtered/skipped)",
+                logger.warning(
+                    "Job %s detected %s→%s but forwarded 0 (check accounts/filters)",
                     job_id, cursor + 1, latest,
                 )
         await asyncio.sleep(interval)

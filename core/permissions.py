@@ -394,9 +394,36 @@ async def verify_target_executor(
     *,
     bot_id: Optional[str] = None,
     account_id: Optional[str] = None,
+    mgmt_client: Optional[Client] = None,
 ) -> Optional[str]:
-    """Target chat add: executor admin + M_USER admin. Management bot ignored."""
+    """Target chat add: executor admin + M_USER admin.
+
+    `__mgmt__` uses the live management-bot client (already running). Jobs
+    still cannot forward via the management bot — this is add-target only.
+    """
     if bot_id:
+        if str(bot_id) == "__mgmt__":
+            client = mgmt_client
+            if client is None:
+                try:
+                    from core.log_chat import get_mgmt_bot
+                    client = get_mgmt_bot()
+                except Exception:
+                    client = None
+            if not client:
+                return "❌ Management bot client is not available. Restart the bot and try again."
+            e = await check_self_admin(client, chat_id, kind="bot", chat_label="chat")
+            if e:
+                return (
+                    "❌ Management bot must be an administrator in this chat."
+                    if "administrator" in e.lower() or "present" in e.lower()
+                    else e
+                )
+            e = await check_user_admin(client, chat_id, user_id, chat_label="chat")
+            if e:
+                return e
+            return None
+
         bot_doc, err = await assert_bot_owned(user_id, bot_id)
         if err:
             return err

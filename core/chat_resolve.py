@@ -196,3 +196,96 @@ async def resolve_source_chat_id(
     return await resolve_chat_for_user(
         mgmt_client, user_id, str(source_chat_id), account_ids=account_ids
     )
+
+
+_PLACEHOLDER_TITLES = frozenset(
+    {"source", "unknown", "—", "-", "detected source", "chat"}
+)
+
+
+def is_placeholder_title(title: Optional[str]) -> bool:
+    s = (title or "").strip()
+    if not s:
+        return True
+    if s.lstrip("-").isdigit():
+        return True
+    low = s.lower()
+    if low in _PLACEHOLDER_TITLES:
+        return True
+    if low.startswith("chat ") and s[5:].lstrip("-").isdigit():
+        return True
+    return False
+
+
+def clean_chat_title(title: Optional[str], fallback: str = "") -> str:
+    s = (title or "").strip()
+    if is_placeholder_title(s):
+        return (fallback or "").strip()
+    return s
+
+
+async def resolve_title_via_job_executor(
+    user_id: int,
+    chat_id,
+    *,
+    method: str = "",
+    bot_id: Optional[str] = None,
+    account_ids: Optional[list] = None,
+    fallback: str = "",
+) -> str:
+    """Resolve a real chat title using the SAME bot/account that will forward.
+
+    Management bot is never used — it is often not a member of the source,
+    which previously left Jobs named "Source" unless it happened to be admin.
+    """
+    kept = clean_chat_title(fallback)
+    if chat_id is None or chat_id == "":
+        return kept or (fallback or "Source")
+
+    method = (method or "").lower()
+    clients = []
+
+    from database import get_account, get_bot
+    from core.job_worker import get_user_client, get_bot_client
+
+    ids = [str(a) for a in (account_ids or []) if a]
+    if method in ("user", "account") or (ids and method != "bot"):
+        for aid in ids:
+            try:
+                acc = await get_account(user_id, aid)
+                if not acc:
+                    continue
+                uc = await get_user_client(acc)
+                if uc:
+                    clients.append(uc)
+            except Exception:
+                logger.debug("title via account %s failed", aid, exc_info=True)
+
+    bid = str(bot_id) if bot_id else ""
+    if bid and bid != "__mgmt__" and method != "user":
+        try:
+            bot = await get_bot(user_id, bid)
+            if bot and not bot.get("is_mgmt"):
+                bc = await get_bot_client(bot)
+                if bc:
+                    clients.append(bc)
+        except Exception:
+            logger.debug("title via bot %s failed", bid, exc_info=True)
+
+    for c in clients:
+        try:
+            ref = chat_id
+            if isinstance(ref, str) and ref.lstrip("-").isdigit():
+                ref = int(ref)
+            ch = await c.get_chat(ref)
+            t = clean_chat_title(
+                getattr(ch, "title", None)
+                or getattr(ch, "first_name", None)
+                or getattr(ch, "username", None)
+            )
+            if t:
+                return t
+        except Exception:
+            continue
+
+    return kept or (fallback or "").strip() or str(chat_id)
