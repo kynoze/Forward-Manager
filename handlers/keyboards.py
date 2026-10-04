@@ -46,7 +46,10 @@ def dashboard_keyboard(allowed: dict | None = None, *, is_owner: bool = False) -
         buttons.append(row)
 
     buttons.append([InlineKeyboardButton("🗄️ My Databases", callback_data="dash:mydbs")])
-    buttons.append([InlineKeyboardButton("🩺 Runtime Health", callback_data="health:home")])
+    buttons.append([
+        InlineKeyboardButton("🩺 Runtime Health", callback_data="health:home"),
+        InlineKeyboardButton("📊 System Usage", callback_data="sys:home"),
+    ])
     buttons.append([InlineKeyboardButton("📢 Log Chat", callback_data="log:home")])
     buttons.append([InlineKeyboardButton("🗄️ My Storage", callback_data="dash:storage")])
     if is_owner:

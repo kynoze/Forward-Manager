@@ -1,5 +1,5 @@
 
-"""Runtime Health UI."""
+"""Runtime Health + System Usage UI."""
 from __future__ import annotations
 
 from pyrogram import Client, filters
@@ -25,6 +25,26 @@ async def health_callbacks(client: Client, query: CallbackQuery):
                 text += f"• {d.get('feature')}: `{d.get('title')}` — {str(d.get('reason') or '')[:60]}\n"
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Refresh", callback_data="health:refresh")],
+            [InlineKeyboardButton("📊 System Usage", callback_data="sys:home")],
+            [InlineKeyboardButton("« Dashboard", callback_data="dash:home")],
+        ])
+        await safe_edit(query, text[:3900], kb)
+        return await safe_answer(query)
+    await safe_answer(query)
+
+
+@Client.on_callback_query(filters.regex(r"^sys:"))
+async def system_usage_callbacks(client: Client, query: CallbackQuery):
+    user_id = query.from_user.id
+    if not await can_access_bot(user_id):
+        return await query.answer("Not allowed", show_alert=True)
+    data = query.data
+    if data in ("sys:home", "sys:refresh"):
+        from core.system_stats import build_system_usage_text
+        text = await build_system_usage_text()
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="sys:refresh")],
+            [InlineKeyboardButton("🩺 Runtime Health", callback_data="health:home")],
             [InlineKeyboardButton("« Dashboard", callback_data="dash:home")],
         ])
         await safe_edit(query, text[:3900], kb)
