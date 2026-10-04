@@ -46,7 +46,11 @@ from core.message_iter import custom_iter_messages
 
 logger = logging.getLogger(__name__)
 
+# Rotate accounts after this many seconds of FloodWait (behaviour only).
 FLOODWAIT_ROTATE_AFTER = 30
+# Only WARNING (→ owner log) for long waits. Telegram routinely returns
+# 30–40s; those must stay INFO so OwnerLogHandler does not spam.
+FLOODWAIT_OWNER_WARN_AFTER = 120
 PAUSE_REASON_ACCOUNTS = "accounts_unavailable"
 PROGRESS_EVERY = 10  # update progress message every N fetched msgs
 
@@ -186,28 +190,32 @@ async def send_one(
     forward_tag: bool,
     use_rich_message: bool = False,
 ):
-    # Native forward preserves original caption / no buttons — skip it when the
-    # caller already mutated the caption (replacements, template, remove_links)
-    # or attached inline buttons. Those features require copy / send_cached.
-    original_text = str(message.caption or message.text or "") or ""
-    final_str = None if final_caption is None else str(final_caption)
-    needs_custom_caption = final_str is not None and final_str != original_text
-    # Also treat explicit None-after-strip vs original non-empty as mutation
-    caption_was_cleared = final_str is None and bool(original_text.strip())
-    has_buttons = reply_markup is not None
-    can_native_forward = (
-        forward_tag
-        and not needs_custom_caption
-        and not caption_was_cleared
-        and not has_buttons
-    )
-
-    if can_native_forward:
-        await client.forward_messages(
+    # Forward Tag ON → native forward (same contract as CNL Auto-Post).
+    # Telegram only shows "Forwarded from …" on messages.forwardMessages.
+    # copy_message / send_cached_media always drop the tag, so caption edits
+    # and inline buttons cannot be applied while the tag is enabled.
+    #
+    # Previous logic compared process_caption() HTML against str(caption)
+    # (plain Kurigram Str). Formatted video/document captions (bold titles,
+    # @mentions, links — typical on dump channels) looked "mutated" even
+    # with no caption settings, so Jobs silently used send_cached_media and
+    # the tag never appeared.
+    if forward_tag:
+        from_chat = source_chat_id
+        chat = getattr(message, "chat", None)
+        if chat is not None and getattr(chat, "id", None) is not None:
+            from_chat = chat.id
+        fwd_kw = dict(
             chat_id=target_chat_id,
-            from_chat_id=source_chat_id,
+            from_chat_id=from_chat,
             message_ids=message.id,
         )
+        # kurigram 2.2.x: hide_sender_name maps to drop_author. Pin it off
+        # so the tag cannot be stripped by a future default change.
+        try:
+            await client.forward_messages(**fwd_kw, hide_sender_name=False)
+        except TypeError:
+            await client.forward_messages(**fwd_kw)
         return
 
     if message.media:
@@ -467,8 +475,13 @@ async def forward_messages(
                     )
                 continue
 
-            final_caption = process_caption(message, settings)
-            reply_markup = build_inline_keyboard(settings)
+            # Forward Tag ON = native forward; caption/buttons cannot ride along.
+            if forward_tag:
+                final_caption = None
+                reply_markup = None
+            else:
+                final_caption = process_caption(message, settings)
+                reply_markup = build_inline_keyboard(settings)
 
             try:
                 # Completion sticker for previous title must go BEFORE this file,
@@ -601,11 +614,25 @@ async def forward_messages(
 
             except (FloodWait, SlowmodeWait) as e:
                 wait = int(getattr(e, "value", 0) or 0)
-                who = current_account_id or (f"bot:{bot_id}" if bot_id else "unknown")
-                # Short waits are normal Telegram rate-limits — do not WARNING
-                # (OwnerLogHandler would spam the owner log chat every minute).
-                if wait >= FLOODWAIT_ROTATE_AFTER:
-                    logger.warning("FloodWait %ss on %s (will try rotate)", wait, who)
+                who = (
+                    current_account_id
+                    or (f"bot:{bot_id}" if bot_id else None)
+                    or (f"job:{job_id}" if job_id else None)
+                    or "client"
+                )
+                # Routine rate-limits stay INFO. OwnerLogHandler only sees
+                # WARNING+, so 30–40s FloodWait must never be WARNING or the
+                # owner log is spammed every rate-window (~10 min).
+                if wait >= FLOODWAIT_OWNER_WARN_AFTER:
+                    logger.warning(
+                        "FloodWait %ss on %s (long wait — will try rotate if possible)",
+                        wait,
+                        who,
+                    )
+                elif wait >= FLOODWAIT_ROTATE_AFTER:
+                    logger.info(
+                        "FloodWait %ss on %s — sleeping / try rotate", wait, who
+                    )
                 else:
                     logger.info("FloodWait %ss on %s — sleeping", wait, who)
                 if (
