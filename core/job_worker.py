@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 from datetime import timedelta
 from typing import Dict, Optional, Tuple, List
 
@@ -45,6 +47,15 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_SECONDS = 5
 FUTURE_POLL_SECONDS = 10  # default; live jobs use job.monitor_interval_seconds
 
+# Cap parallel job tasks so Pyrogram clients don't blow 512MB RAM.
+# Override with env MAX_CONCURRENT_JOBS (1–8).
+try:
+    MAX_CONCURRENT_JOBS = max(1, min(8, int(os.environ.get("MAX_CONCURRENT_JOBS", "2") or 2)))
+except ValueError:
+    MAX_CONCURRENT_JOBS = 2
+# Drop idle forward clients after this many seconds (keeps RAM low).
+CLIENT_IDLE_SECONDS = int(os.environ.get("CLIENT_IDLE_SECONDS", "600") or 600)
+
 PAUSE_REASON_ACCOUNTS = "accounts_unavailable"
 ACCOUNT_PAUSE_MESSAGES = {
     "All accounts sleeping or unavailable",
@@ -54,6 +65,7 @@ ACCOUNT_PAUSE_MESSAGES = {
 }
 
 RUNNING_JOB_TASKS: Dict[str, asyncio.Task] = {}
+CLIENT_LAST_USED: Dict[str, float] = {}
 
 
 async def cancel_running_job(user_id: int, job_id: str) -> bool:
@@ -318,7 +330,21 @@ async def job_worker_loop(_management_client=None):
             if resumed:
                 logger.info("Auto-resumed %s job(s) after account sleep", resumed)
 
+            # Drop finished task slots
+            for jid, task in list(RUNNING_JOB_TASKS.items()):
+                if task is None or task.done():
+                    RUNNING_JOB_TASKS.pop(jid, None)
+
+            # Evict idle forward clients (not used by any live job slot)
+            try:
+                await prune_idle_clients()
+            except Exception:
+                logger.exception("prune_idle_clients")
+
             jobs = await get_active_jobs()
+            active_count = sum(
+                1 for t in RUNNING_JOB_TASKS.values() if t and not t.done()
+            )
             for job in jobs:
                 if job.get("status") != JobStatus.RUNNING.value:
                     continue
@@ -326,7 +352,10 @@ async def job_worker_loop(_management_client=None):
                 task = RUNNING_JOB_TASKS.get(job_id)
                 if task and not task.done():
                     continue
+                if active_count >= MAX_CONCURRENT_JOBS:
+                    break
                 RUNNING_JOB_TASKS[job_id] = asyncio.create_task(run_single_job(job))
+                active_count += 1
         except Exception as e:
             from core.errors import is_mongo_unreachable
             if is_mongo_unreachable(e):
@@ -352,8 +381,10 @@ async def get_bot_client(bot_doc: dict) -> Optional[Client]:
         logger.error("Management Bot cannot be used for Jobs — select a Forward Bot")
         return None
 
-    cached = CLIENTS.get(f"bot:{bot_id}")
+    key = f"bot:{bot_id}"
+    cached = CLIENTS.get(key)
     if cached:
+        CLIENT_LAST_USED[key] = time.monotonic()
         return cached
 
     token = bot_doc.get("bot_token")
@@ -376,9 +407,11 @@ async def get_bot_client(bot_doc: dict) -> Optional[Client]:
             in_memory=True,
             parse_mode=ParseMode.HTML,
             no_updates=True,
+            workers=1,
         )
         await client.start()
-        CLIENTS[f"bot:{bot_id}"] = client
+        CLIENTS[key] = client
+        CLIENT_LAST_USED[key] = time.monotonic()
         logger.info("Forward bot started: %s (%s)", bot_doc.get("name"), bot_id)
         return client
     except Exception:
@@ -388,8 +421,10 @@ async def get_bot_client(bot_doc: dict) -> Optional[Client]:
 
 async def get_user_client(account_doc: dict) -> Optional[Client]:
     acc_id = account_doc["account_id"]
-    cached = CLIENTS.get(f"acc:{acc_id}")
+    key = f"acc:{acc_id}"
+    cached = CLIENTS.get(key)
     if cached:
+        CLIENT_LAST_USED[key] = time.monotonic()
         return cached
 
     session = account_doc.get("session_string")
@@ -412,9 +447,11 @@ async def get_user_client(account_doc: dict) -> Optional[Client]:
             in_memory=True,
             parse_mode=ParseMode.HTML,
             no_updates=True,
+            workers=1,
         )
         await client.start()
-        CLIENTS[f"acc:{acc_id}"] = client
+        CLIENTS[key] = client
+        CLIENT_LAST_USED[key] = time.monotonic()
         logger.info("User client started: %s", acc_id)
         return client
     except (UserDeactivated, AuthKeyUnregistered, SessionRevoked) as e:
@@ -434,6 +471,7 @@ async def get_user_client(account_doc: dict) -> Optional[Client]:
 
 
 async def drop_client(key: str):
+    CLIENT_LAST_USED.pop(key, None)
     client = CLIENTS.pop(key, None)
     if not client:
         return
@@ -441,6 +479,31 @@ async def drop_client(key: str):
         await client.stop()
     except Exception:
         pass
+
+
+async def prune_idle_clients() -> int:
+    """Stop forward bot/account clients idle longer than CLIENT_IDLE_SECONDS."""
+    if CLIENT_IDLE_SECONDS <= 0:
+        return 0
+    now = time.monotonic()
+    dropped = 0
+    for key in list(CLIENTS.keys()):
+        last = CLIENT_LAST_USED.get(key, 0.0)
+        if last and (now - last) < CLIENT_IDLE_SECONDS:
+            continue
+        # Never drop while any job task is still running (safe default)
+        if any(t and not t.done() for t in RUNNING_JOB_TASKS.values()):
+            break
+        await drop_client(key)
+        dropped += 1
+    if dropped:
+        logger.info("Pruned %s idle forward client(s)", dropped)
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+    return dropped
 
 
 async def get_new_client_for_rotation(

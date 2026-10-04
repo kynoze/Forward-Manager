@@ -82,7 +82,14 @@ async def connect_index_db(user_id: int, uri: str, db_name: str = "IndexDB") -> 
     if not ok:
         return False, msg
     try:
-        client = AsyncMongoClient(uri, serverSelectionTimeoutMS=15000, maxPoolSize=10, minPoolSize=0, maxIdleTimeMS=45000)
+        client = AsyncMongoClient(
+            uri,
+            serverSelectionTimeoutMS=15000,
+            maxPoolSize=5,
+            minPoolSize=0,
+            maxIdleTimeMS=30000,
+            heartbeatFrequencyMS=30000,
+        )
         await client.admin.command("ping")
         # Prefer DB name from URI path if present, else IndexDB
         try:

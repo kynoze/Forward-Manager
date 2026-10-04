@@ -199,9 +199,11 @@ async def get_cached_client(uri: str) -> AsyncMongoClient:
                 serverSelectionTimeoutMS=20000,
                 connectTimeoutMS=20000,
                 socketTimeoutMS=45000,
-                maxPoolSize=25,
+                maxPoolSize=5,
                 minPoolSize=0,
-                maxIdleTimeMS=45000,
+                maxIdleTimeMS=30000,
+                waitQueueTimeoutMS=15000,
+                heartbeatFrequencyMS=30000,
             )
         client = AsyncMongoClient(uri, **kw)
         _clients[key] = client

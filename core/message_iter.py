@@ -14,7 +14,8 @@ from pyrogram.types import Message
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BATCH = 200
+# Smaller batches = less peak RAM on 512MB hosts (message objects are heavy).
+DEFAULT_BATCH = 50
 
 
 async def custom_iter_messages(
@@ -50,7 +51,7 @@ async def custom_iter_messages(
             consecutive_failures = 0
         except FloodWait as e:
             wait = int(getattr(e, "value", 1) or 1) + 1
-            logger.warning("custom_iter_messages FloodWait %ss @%s", wait, current + 1)
+            logger.info("custom_iter_messages FloodWait %ss @%s", wait, current + 1)
             await asyncio.sleep(min(wait, 120))
             continue
         except Exception as e:
