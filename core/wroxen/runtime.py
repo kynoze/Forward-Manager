@@ -164,6 +164,7 @@ async def start_bot_for_config(cfg: Dict[str, Any]) -> Optional[Client]:
         bot_token=token,
         in_memory=True,
         parse_mode=ParseMode.HTML,
+        workers=2,
     )
 
     # Auto-index: media in source chats

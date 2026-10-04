@@ -93,11 +93,12 @@ async def test_uri(uri: str, timeout_ms: int = 8000) -> Tuple[bool, str]:
     try:
         client = AsyncMongoClient(
             uri,
-            maxPoolSize=15,
+            maxPoolSize=5,
             minPoolSize=0,
-            maxIdleTimeMS=45000,
+            maxIdleTimeMS=30000,
             serverSelectionTimeoutMS=timeout_ms,
             connectTimeoutMS=timeout_ms,
+            heartbeatFrequencyMS=30000,
         )
         await client.admin.command("ping")
         return True, "Connected"
@@ -124,6 +125,10 @@ async def connect(user_id: int, uri: str) -> Tuple[bool, str]:
             uri,
             serverSelectionTimeoutMS=8000,
             connectTimeoutMS=8000,
+            maxPoolSize=5,
+            minPoolSize=0,
+            maxIdleTimeMS=30000,
+            heartbeatFrequencyMS=30000,
         )
         await client.admin.command("ping")
         mdb = client[_db_name_from_uri(uri)]
