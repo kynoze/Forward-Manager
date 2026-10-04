@@ -1128,9 +1128,9 @@ async def rename_job(user_id: int, job_id: str, new_name: str) -> bool:
 async def next_job_name_for_source(user_id: int, source_title: str) -> str:
     """Auto name for new jobs only.
 
-    First job for this source title → exact title (e.g. "Alex Updates")
-    Second → "Alex Updates A", then B, C, ...
-    Independent per distinct source title string.
+    First job for this base string → exact (e.g. "Alex => Movies")
+    Second → "Alex => Movies A", then B, C, ...
+    Independent per distinct base string.
     Does not rename existing jobs. Custom names are untouched when caller passes them.
     """
     base = (source_title or "Source").strip() or "Source"
@@ -1161,6 +1161,21 @@ async def next_job_name_for_source(user_id: int, source_title: str) -> str:
         candidate = f"{base} {n}"
         # rare
         return candidate
+
+
+def format_auto_job_name(source_title: str, target_titles: Optional[List[str]] = None) -> str:
+    """Jobs auto-name: `Source => Target` (extra targets as +N)."""
+    src = (source_title or "Source").strip() or "Source"
+    titles = []
+    for t in target_titles or []:
+        s = str(t or "").strip()
+        if s:
+            titles.append(s)
+    if not titles:
+        return src
+    if len(titles) == 1:
+        return f"{src} => {titles[0]}"
+    return f"{src} => {titles[0]} +{len(titles) - 1}"
 
 async def create_job(
     user_id: int,
