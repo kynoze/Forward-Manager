@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class CnlClientManager:
-    def __init__(self, max_clients=100, workers_per_client=8):
+    def __init__(self, max_clients=20, workers_per_client=2):
         # key: "user_id" (legacy) or "user_id:account_id"
         self._clients: Dict[str, Client] = {}
         self.max_clients = max_clients

@@ -54,7 +54,14 @@ class CnlDatabase:
                     await self.client.close()
                 except Exception:
                     pass
-            self.client = AsyncMongoClient(uri, serverSelectionTimeoutMS=8000)
+            self.client = AsyncMongoClient(
+                uri,
+                serverSelectionTimeoutMS=8000,
+                maxPoolSize=5,
+                minPoolSize=0,
+                maxIdleTimeMS=30000,
+                heartbeatFrequencyMS=30000,
+            )
             await self.client.admin.command("ping")
             name = db_name or DEFAULT_DB_NAME
             try:
@@ -830,7 +837,13 @@ class CnlDatabase:
             if not uri:
                 return self.message_hashes
             _apply_dns()
-            self._dupe_clients[uid] = AsyncMongoClient(uri, serverSelectionTimeoutMS=6000)
+            self._dupe_clients[uid] = AsyncMongoClient(
+                uri,
+                serverSelectionTimeoutMS=6000,
+                maxPoolSize=3,
+                minPoolSize=0,
+                maxIdleTimeMS=30000,
+            )
         name = d.get("db_name") or DUPE_DB_NAME
         return self._dupe_clients[uid][name]["message_hashes"]
 

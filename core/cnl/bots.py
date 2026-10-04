@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class CnlBotManager:
-    def __init__(self, max_bots=150, workers_per_bot=8):
+    def __init__(self, max_bots=20, workers_per_bot=2):
         # key: "user_id" or "user_id:bot_id"
         self._bots: Dict[str, Client] = {}
         self._lock = asyncio.Lock()
