@@ -19,18 +19,19 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
-# Atlas M0 / shared: keep pools small so concurrent clients don't exhaust cluster limit (~500).
+# Atlas M0 + 512MB hosts: tiny pools. Each pooled socket costs RAM; 25 was
+# overkill and contributed to OOM on Koyeb free (512MB).
 MONGO_CLIENT_KW = dict(
     serverSelectionTimeoutMS=20000,
     connectTimeoutMS=20000,
     socketTimeoutMS=45000,
     retryWrites=True,
     retryReads=True,
-    maxPoolSize=25,
+    maxPoolSize=5,
     minPoolSize=0,
-    maxIdleTimeMS=45000,
+    maxIdleTimeMS=30000,
     waitQueueTimeoutMS=15000,
-    heartbeatFrequencyMS=10000,
+    heartbeatFrequencyMS=30000,
 )
 
 

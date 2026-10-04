@@ -32,6 +32,8 @@ app = Client(
     parse_mode=ParseMode.MARKDOWN,
     in_memory=True,
     plugins=dict(root="handlers"),
+    # 512MB hosts: fewer update worker threads
+    workers=int(__import__("os").environ.get("MGMT_WORKERS", "4") or 4),
 )
 
 
@@ -101,16 +103,25 @@ async def main():
             await report_owner("ERROR", "Delete Manager failed to start", "See bot logs.")
         except Exception:
             pass
+    low_mem = (os.environ.get("LOW_MEMORY", "").strip().lower() in ("1", "true", "yes")
+               or os.environ.get("KOYEB_FREE", "").strip().lower() in ("1", "true", "yes"))
     try:
         from core.wroxen.runtime import refresh_routing
         await refresh_routing()
         logger.info("Wroxen runtime routing loaded")
-        try:
-            from core.wroxen.trending.service import start_trending_updater
-            await start_trending_updater()
-            logger.debug("Wroxen Trending updater scheduled")
-        except Exception:
-            logger.exception("Wroxen Trending updater start skipped")
+        # Trending updater OFF by default (saves RAM on 512MB). Set ENABLE_TRENDING=1 to turn on.
+        enable_trending = os.environ.get("ENABLE_TRENDING", "").strip().lower() in (
+            "1", "true", "yes",
+        )
+        if enable_trending and not low_mem:
+            try:
+                from core.wroxen.trending.service import start_trending_updater
+                await start_trending_updater()
+                logger.info("Wroxen Trending updater scheduled (ENABLE_TRENDING=1)")
+            except Exception:
+                logger.exception("Wroxen Trending updater start skipped")
+        else:
+            logger.info("Wroxen Trending updater OFF (default)")
     except Exception:
         logger.exception("Wroxen runtime start skipped")
         try:
@@ -130,6 +141,24 @@ async def main():
             await report_owner("ERROR", "CNL failed to start", "See bot logs.")
         except Exception:
             pass
+
+    async def _memory_gc_loop():
+        import gc
+        while True:
+            await asyncio.sleep(300)
+            try:
+                n = gc.collect()
+                logger.debug("gc.collect() freed %s objects", n)
+            except Exception:
+                pass
+
+    asyncio.create_task(_memory_gc_loop())
+    if low_mem:
+        logger.info(
+            "LOW_MEMORY mode on · MAX_CONCURRENT_JOBS=%s · MGMT_WORKERS=%s",
+            os.environ.get("MAX_CONCURRENT_JOBS", "2"),
+            os.environ.get("MGMT_WORKERS", "4"),
+        )
     logger.info("Job worker started")
     try:
         ver = open("VERSION.txt").read().strip()
