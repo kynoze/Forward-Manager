@@ -350,15 +350,19 @@ class OwnerLogHandler(logging.Handler):
             or ("detected" in low and "forwarded" in low)
         ):
             return
-        # FloodWait / SlowmodeWait are expected rate-limits — collapse to one
-        # owner notice per logger every 10 minutes (varying "15s"/"16s" must
-        # not create unique rate keys that defeat the limiter).
+        # FloodWait / SlowmodeWait are normal Telegram rate-limits during
+        # bulk forward — never forward to owner log (still appear in console
+        # at INFO). Long waits can still be logged WARNING in forwarder, but
+        # owner chat should stay clean.
         is_flood = (
             "floodwait" in low
             or "slowmodewait" in low
             or "flood wait" in low
             or "slowmode wait" in low
+            or "will try rotate" in low
         )
+        if is_flood and record.levelno < logging.ERROR:
+            return
         try:
             msg = self.format(record)
         except Exception:
@@ -369,13 +373,10 @@ class OwnerLogHandler(logging.Handler):
         level = "ERROR" if record.levelno >= logging.ERROR else "WARNING"
         low = (raw or "").lower()
         is_deprecation = "deprecated" in low or "will be removed" in low
-        # Rate key: deprecations / flood waits collapse; others by logger+msg
+        # Rate key: deprecations collapse; others by logger+msg
         if is_deprecation:
             rate_key = f"ownlog:depr:{(raw or '')[:120]}"
             window = 300.0  # same deprecation at most once per 5 min
-        elif is_flood:
-            rate_key = f"ownlog:flood:{name}:{record.funcName or '-'}"
-            window = 600.0  # at most once per 10 min per logger site
         else:
             rate_key = f"ownlog:{name}:{record.funcName}:{(raw or '')[:80]}"
             window = OWNER_RATE_SEC
