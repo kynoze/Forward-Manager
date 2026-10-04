@@ -206,21 +206,13 @@ async def target_callbacks(client: Client, query: CallbackQuery):
         return
 
     if data == "tg:add":
-        from database import get_user_bots, get_user_accounts
-        bots = await get_user_bots(user_id)
-        from handlers.ui import active_accounts_only
-        accs = active_accounts_only(await get_user_accounts(user_id))
-        if not bots and not accs:
-            return await query.answer(
-                "❌ Add at least one Bot or User Account before adding a Target Chat.",
-                show_alert=True,
-            )
         await safe_edit(
             query,
             "**➕ Add New Target**\n\n"
-            "Send the **Channel / Group ID** or **Username**.\n\n"
-            "Management Bot does **not** need to be admin.\n"
-            "After the chat ID, you will select a **Bot** or **Account** to verify permissions.\n\n"
+            "Send the **Channel / Group ID** or **Username**, or **forward a post** from it.\n\n"
+            "Then pick who verifies admin:\n"
+            "• **Management Bot** — this bot must be admin in the target\n"
+            "• **Forward Bot / Account** — that executor must be admin\n\n"
             "Example:\n`-1001234567890`  or  `@mychannel`\n\n"
             "Type /cancel to cancel.",
         )
@@ -278,11 +270,28 @@ async def target_callbacks(client: Client, query: CallbackQuery):
         from database import add_target, get_user_targets, get_account, get_bot
         from core.job_worker import get_user_client, get_bot_client
 
+        def _is_mgmt(bid) -> bool:
+            return str(bid or "") == "__mgmt__"
+
         # Resolve peer using ONLY selected executors (first success wins for title/id)
         ref = chat_id if chat_id else username
         resolved_id = chat_id
         resolved_title = title
         resolved_username = username
+
+        def _apply_chat(ch) -> None:
+            nonlocal resolved_id, resolved_title, resolved_username
+            if ch is None:
+                return
+            try:
+                resolved_id = int(ch.id)
+            except Exception:
+                pass
+            t = getattr(ch, "title", None) or getattr(ch, "first_name", None)
+            if t:
+                resolved_title = t
+            resolved_username = getattr(ch, "username", None) or resolved_username
+
         for aid in sel_accs:
             acc = await get_account(user_id, str(aid))
             if not acc:
@@ -295,22 +304,18 @@ async def target_callbacks(client: Client, query: CallbackQuery):
                 if isinstance(r, str) and r.lstrip("-").isdigit():
                     r = int(r)
                 ch = await uc.get_chat(r)
-                resolved_id = int(ch.id)
-                resolved_title = ch.title or resolved_title
-                resolved_username = getattr(ch, "username", None) or resolved_username
+                _apply_chat(ch)
                 break
             except Exception:
                 try:
                     async for d in uc.get_dialogs(limit=200):
                         c = getattr(d, "chat", None)
                         if c and chat_id and int(c.id) == int(chat_id):
-                            resolved_id = int(c.id)
-                            resolved_title = c.title or resolved_title
-                            resolved_username = getattr(c, "username", None) or resolved_username
+                            _apply_chat(c)
                             break
                 except Exception:
                     pass
-        # Always try selected bots for real title (not only when id is missing)
+
         need_title = (
             not resolved_title
             or str(resolved_title).startswith("Chat ")
@@ -319,10 +324,13 @@ async def target_callbacks(client: Client, query: CallbackQuery):
         )
         if sel_bots and (resolved_id is None or need_title):
             for bid in sel_bots:
-                bot = await get_bot(user_id, str(bid))
-                if not bot:
-                    continue
-                bc = await get_bot_client(bot)
+                if _is_mgmt(bid):
+                    bc = client
+                else:
+                    bot = await get_bot(user_id, str(bid))
+                    if not bot:
+                        continue
+                    bc = await get_bot_client(bot)
                 if not bc:
                     continue
                 try:
@@ -330,10 +338,7 @@ async def target_callbacks(client: Client, query: CallbackQuery):
                     if isinstance(r, str) and r.lstrip("-").isdigit():
                         r = int(r)
                     ch = await bc.get_chat(r)
-                    resolved_id = int(ch.id)
-                    if getattr(ch, "title", None):
-                        resolved_title = ch.title
-                    resolved_username = getattr(ch, "username", None) or resolved_username
+                    _apply_chat(ch)
                     if resolved_title and not str(resolved_title).startswith("Chat "):
                         break
                 except Exception:
@@ -349,13 +354,17 @@ async def target_callbacks(client: Client, query: CallbackQuery):
         fails = []
         ok_names = []
         for bid in sel_bots:
-            err = await verify_target_executor(user_id, int(resolved_id), bot_id=str(bid))
+            err = await verify_target_executor(
+                user_id, int(resolved_id), bot_id=str(bid), mgmt_client=client
+            )
             if err:
-                fails.append("bot %s: %s" % (bid, err))
+                fails.append("bot %s: %s" % ("Management Bot" if _is_mgmt(bid) else bid, err))
             else:
-                ok_names.append("bot:%s" % bid)
+                ok_names.append("Management Bot" if _is_mgmt(bid) else "bot:%s" % bid)
         for aid in sel_accs:
-            err = await verify_target_executor(user_id, int(resolved_id), account_id=str(aid))
+            err = await verify_target_executor(
+                user_id, int(resolved_id), account_id=str(aid), mgmt_client=client
+            )
             if err:
                 fails.append("acc %s: %s" % (aid, err))
             else:
@@ -369,14 +378,20 @@ async def target_callbacks(client: Client, query: CallbackQuery):
                 + chr(10) + chr(10)
                 + chr(10).join(fails[:8])
                 + chr(10) + chr(10)
-                + "Only selected bots/accounts were checked."
+                + "Only selected bots/accounts were checked.\n"
+                "Management Bot / Forward Bot / Account must be **admin** in the target."
             )
             await safe_edit(
                 query,
                 text,
                 _executor_pick_keyboard(bots, accs, sel_bots, sel_accs),
             )
-            return await safe_answer(query, "Permission failed", True)
+            short = fails[0]
+            for prefix in ("bot Management Bot: ", "bot __mgmt__: "):
+                if short.startswith(prefix):
+                    short = short[len(prefix):]
+                    break
+            return await safe_answer(query, short[:180] or "Permission failed", True)
         result = await add_target(
             user_id=user_id,
             chat_id=int(resolved_id),

@@ -639,12 +639,6 @@ async def handle_all_text_input(client: Client, message: Message):
             accs = await get_user_accounts(user_id)
             bots_a = _active_bots_only(bots)
             accs_a = active_accounts_only(accs)
-            if not bots_a and not accs_a:
-                set_state(client, "target_add_state", user_id, None)
-                return await message.reply(
-                    "No active Bot or User Account found. "
-                    "Disabled accounts are not listed. Enable one first."
-                )
 
             set_state(
                 client,
@@ -663,13 +657,20 @@ async def handle_all_text_input(client: Client, message: Message):
                 label = "%s (`%s`)" % (title or "Chat", chat_id)
             else:
                 label = str(username or display)
+            extra = ""
+            if not bots_a and not accs_a:
+                extra = (
+                    chr(10)
+                    + "No forward bots/accounts yet — you can still verify with "
+                    "**Management Bot** if it is admin in the target."
+                    + chr(10)
+                )
             text_out = (
-                "**Select bot(s) / account(s) to verify**" + chr(10) + chr(10)
-                + "Chat: **" + label + "**" + chr(10) + chr(10)
-                + "• Toggle one or more (disabled accounts hidden)" + chr(10)
-                + "• Only selected bots/accounts resolve + check admin" + chr(10)
-                + "• Management Bot is not used" + chr(10) + chr(10)
-                + "Then tap **Done — check permissions**."
+                "**Select who verifies this target**" + chr(10) + chr(10)
+                + "Chat: **" + label + "**" + chr(10) + extra + chr(10)
+                + "• Toggle **Management Bot** and/or a Forward Bot / Account" + chr(10)
+                + "• Whoever you select must be **admin** in the target" + chr(10)
+                + "• Then tap **Done — check permissions**."
             )
             await message.reply(
                 text_out,

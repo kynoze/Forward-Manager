@@ -11,6 +11,7 @@ from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 from config import Config
 from database import (
     next_job_name_for_source,
+    format_auto_job_name,
     rename_job,
     JobStatus,
     add_job_log,
@@ -29,6 +30,7 @@ from database import (
     get_user_jobs,
     get_visible_jobs,
     get_user_targets,
+    get_target,
     is_admin,
     job_monitor_interval,
     job_progress_ui_interval,
@@ -853,7 +855,7 @@ def job_confirm_keyboard(state: dict) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    f"✏️ Name: {(state.get('custom_name') or (state.get('source_title') or 'auto') + ' (auto)')[:32]}",
+                    f"✏️ Name: {(state.get('custom_name') or (state.get('auto_name') or (state.get('source_title') or 'auto') + ' (auto)'))[:32]}",
                     callback_data="jobcreate:set_name",
                 )
             ],
@@ -986,9 +988,14 @@ def job_confirm_text(state: dict) -> str:
     last = int(state.get("last_msg_id") or 0)
     skip = int(state.get("skip") or 0)
     start_at = skip + 1 if last else 0
+    auto = state.get("auto_name") or format_auto_job_name(
+        state.get("source_title") or "Source",
+        state.get("target_titles") or [],
+    )
+    shown_name = (state.get("custom_name") or "").strip() or f"{auto} (auto)"
     return (
         "**Create Job – Confirm**\n\n"
-        f"**Name:** {state.get('custom_name') or ((state.get('source_title') or 'Source') + ' (auto)')}\n"
+        f"**Name:** {shown_name}\n"
         f"**Source:** {state.get('source_title')}\n"
         f"**Source ID:** `{state.get('source_chat_id')}`\n"
         f"**Last message ID:** `{last}`  (from source link — not skip)\n"
@@ -996,6 +1003,7 @@ def job_confirm_text(state: dict) -> str:
         f"**Targets:** `{len(state.get('selected_targets') or [])}`\n"
         f"**Method:** `{state.get('method')}`\n"
         f"**Future New Posts:** `{'ON' if state.get('future_new_posts') else 'OFF'}`\n**Pre-Index Target Dupes:** `{'ON' if state.get('pre_index_target_duplicates') else 'OFF'}`\n\n"
+        "Auto name = **Source => Target** (via the selected forward bot/account, not the management bot).\n"
         "Skip ka matlab Quick Forward jaisa: pehle N messages skip, uske baad last ID tak.\n"
         "Tap **Skip** to change. Send only a number like `0` or `200`."
     )
@@ -1863,6 +1871,45 @@ def _persist_create(client: Client, user_id: int, state: dict) -> None:
     set_state(client, "job_create_state", user_id, state)
 
 
+async def _refresh_job_create_titles(user_id: int, state: dict) -> dict:
+    """Fill source/target titles via the selected forward bot/account (never mgmt bot)."""
+    from core.chat_resolve import resolve_title_via_job_executor
+
+    method = state.get("method") or ""
+    bot_id = state.get("bot_id")
+    account_ids = state.get("selected_accounts") or []
+    src_title = await resolve_title_via_job_executor(
+        user_id,
+        state.get("source_chat_id"),
+        method=method,
+        bot_id=bot_id,
+        account_ids=account_ids,
+        fallback=state.get("source_title") or "",
+    )
+    state["source_title"] = src_title or state.get("source_title") or "Source"
+
+    target_titles = []
+    for tid in state.get("selected_targets") or []:
+        stored = ""
+        try:
+            t = await get_target(user_id, int(tid))
+            stored = (t or {}).get("title") or ""
+        except Exception:
+            stored = ""
+        title = await resolve_title_via_job_executor(
+            user_id,
+            tid,
+            method=method,
+            bot_id=bot_id,
+            account_ids=account_ids,
+            fallback=stored or str(tid),
+        )
+        target_titles.append(title or stored or str(tid))
+    state["target_titles"] = target_titles
+    state["auto_name"] = format_auto_job_name(state["source_title"], target_titles)
+    return state
+
+
 @Client.on_callback_query(filters.regex(r"^jobcreate:"))
 async def job_create_callbacks(client: Client, query: CallbackQuery):
     user_id = query.from_user.id
@@ -1960,6 +2007,7 @@ async def job_create_callbacks(client: Client, query: CallbackQuery):
         )
         if not ok_p:
             return await safe_answer(query, msg_p[:180], True)
+        await _refresh_job_create_titles(user_id, state)
         show_confirm(state)
         _persist_create(client, user_id, state)
         await safe_edit(query, job_confirm_text(state), job_confirm_keyboard(state))
@@ -2044,8 +2092,9 @@ async def job_create_callbacks(client: Client, query: CallbackQuery):
             query,
             "**✏️ Job name**\n\n"
             "Send a custom name for this job.\n"
-            "Send `auto` to use automatic naming from the source title.\n\n"
+            "Send `auto` to use **Source => Target** (from the selected forward bot/account).\n\n"
             f"Source: **{state.get('source_title') or '—'}**\n"
+            f"Auto: **{state.get('auto_name') or '—'}**\n"
             "Send /cancel to abort.",
             InlineKeyboardMarkup(
                 [[InlineKeyboardButton("« Back", callback_data="jobcreate:back_confirm")]]
@@ -2116,14 +2165,11 @@ async def job_create_callbacks(client: Client, query: CallbackQuery):
             if not ok_p:
                 return await safe_answer(query, msg_p[:180], True)
 
-            src_title = (state.get("source_title") or "").strip()
-            if not src_title or src_title in ("Unknown", "Source", "—"):
-                try:
-                    ch = await client.get_chat(state.get("source_chat_id"))
-                    src_title = (getattr(ch, "title", None) or getattr(ch, "first_name", None) or src_title or "Source")
-                except Exception:
-                    src_title = src_title or "Source"
-                state["source_title"] = src_title
+            await _refresh_job_create_titles(user_id, state)
+            src_title = (state.get("source_title") or "").strip() or "Source"
+            auto_name = (state.get("auto_name") or "").strip() or format_auto_job_name(
+                src_title, state.get("target_titles") or []
+            )
             job = await create_job(
                 user_id=user_id,
                 source_chat_id=state.get("source_chat_id"),
@@ -2138,7 +2184,7 @@ async def job_create_callbacks(client: Client, query: CallbackQuery):
                 pre_index_target_duplicates=bool(state.get("pre_index_target_duplicates")),
                 name=(
                     (state.get("custom_name") or "").strip()
-                    or await next_job_name_for_source(user_id, src_title or "Source")
+                    or await next_job_name_for_source(user_id, auto_name)
                 ),
             )
         except Exception:
